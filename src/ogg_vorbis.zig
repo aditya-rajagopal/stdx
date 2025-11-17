@@ -1,6 +1,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+const BitStream = @import("bitstream.zig");
+
 const FourCC = packed struct(u32) {
     byte_1: u8,
     byte_2: u8,
@@ -49,6 +51,11 @@ pub const Error = error{
     MalformedPageSequenceOutOfOrder,
     InvalidVorbisIdentificationPacket,
     InvalidVorbisCommentPacket,
+    InvalidVorbisSetupPacket,
+    InvalidCodebookSyncPattern,
+    InvalidCodebookLengthGreaterThan32,
+    InvalidCodebookInsufficientEntries,
+    InvalidCodebookCannotFindPrefix,
 } || std.mem.Allocator.Error;
 
 const VORBIS_IDENTIFICATION: u32 = 0;
@@ -63,6 +70,7 @@ const VORBIS_CODEC_SETUP_NO: u32 = 3;
 // which serial number to use for which type of stream.
 pub fn decode(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
     const start_state: DecoderState = .read_header;
+    // TODO: Arena allocator for intermediate buffers
 
     var read_head: []const u8 = data;
     // TODO: Do we want to parse this?
@@ -229,10 +237,8 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
                     }
 
                     vorbis_identification_packet = vorbis_id_packet.*;
-                    std.log.err("ID header: {any}", .{vorbis_identification_packet});
                 },
                 VORBIS_COMMENT => {
-                    // TODO: Parse the vorbis comment header
                     if (packet_read_head.len == 0) {
                         return error.MalformedIncompleteData;
                     }
@@ -281,7 +287,203 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
 
                 VORBIS_CODEC_SETUP => {
                     // TODO: Parse the vorbis codec setup header
-                    // std.log.err("Vorbis codec setup header parsed", .{});
+                    if (packet_read_head.len < 7) {
+                        return error.InvalidVorbisSetupPacket;
+                    }
+                    const packet_type: u8 = packet[0];
+                    if (packet_type != 0x05) {
+                        return error.InvalidVorbisSetupPacket;
+                    }
+                    if (!std.mem.eql(u8, packet_read_head[1..7], "vorbis")) {
+                        return error.InvalidVorbisSetupPacket;
+                    }
+                    var bitstream = BitStream.init(packet_read_head[7..]);
+                    const codebook_count: usize = bitstream.consume(8) + 1;
+                    _ = codebook_count;
+                    { // Read a codebook
+                        const sync_pattern: u64 = bitstream.consume(24);
+                        if (sync_pattern != 0x564342) {
+                            return error.InvalidCodebookSyncPattern;
+                        }
+                        const dimension: u16 = @truncate(bitstream.consume(16));
+                        _ = dimension;
+
+                        const codebook_entries: u64 = bitstream.consume(24);
+
+                        const is_ordered: u64 = bitstream.consume(1);
+                        var sparse_flag: u64 = if (is_ordered == 0) bitstream.consume(1) else 0;
+
+                        var lengths = try allocator.alloc(u8, codebook_entries);
+
+                        var total: usize = 0;
+                        if (is_ordered == 0) {
+                            for (0..codebook_entries) |i| {
+                                const is_entry_used: u64 = if (sparse_flag == 1) bitstream.consume(1) else 1;
+                                if (is_entry_used != 0) {
+                                    total += 1;
+                                    lengths[i] = @truncate(bitstream.consume(5) + 1);
+                                    if (lengths[i] > 32) {
+                                        return error.InvalidCodebookLengthGreaterThan32;
+                                    }
+                                } else {
+                                    lengths[i] = VORBIS_NO_CODE;
+                                }
+                            }
+                        } else {
+                            var current_length: u64 = bitstream.consume(5) + 1;
+                            var current_entry: usize = 0;
+                            while (current_entry < codebook_entries) {
+                                const bits_to_read: u64 = ilog(@intCast(codebook_entries - current_entry)) + 1;
+                                const num_at_this_length: u64 = bitstream.consume(@truncate(bits_to_read));
+                                if (current_length >= 32) {
+                                    return error.InvalidCodebookLengthGreaterThan32;
+                                }
+                                if (current_entry + num_at_this_length > codebook_entries) {
+                                    return error.InvalidCodebookInsufficientEntries;
+                                }
+                                @memset(lengths[current_entry..][0..num_at_this_length], @truncate(current_length));
+                                current_entry += num_at_this_length;
+                                current_length += 1;
+                            }
+                        }
+
+                        if (sparse_flag == 1 and total >= codebook_entries >> 2) {
+                            // TODO: If there are enough entries that are valid treat it as non-sparse
+                            sparse_flag = 0;
+                        }
+
+                        const FAST_HUFFMAN_BITS: u6 = 10;
+                        const FAST_HUFFMAN_TABLE_SIZE: usize = 1 << FAST_HUFFMAN_BITS;
+
+                        const slow_path_entry_count = if (sparse_flag == 1)
+                            total
+                        else slow_path_count: {
+                            var count: usize = 0;
+                            for (lengths) |length| {
+                                if (length > FAST_HUFFMAN_BITS and length != VORBIS_NO_CODE) {
+                                    count += 1;
+                                }
+                            }
+                            break :slow_path_count count;
+                        };
+
+                        var codewords: []u32 = undefined;
+                        var codeword_lengths: []u8 = undefined;
+                        var values: []u32 = undefined;
+                        if (sparse_flag == 0) {
+                            codewords = allocator.alloc(u32, codebook_entries) catch unreachable;
+                            codeword_lengths = lengths;
+                        } else {
+                            // @TODO For sparse codebooks allocate only the number of entries that are valid
+                            codewords = allocator.alloc(u32, slow_path_entry_count) catch unreachable;
+                            codeword_lengths = allocator.alloc(u8, slow_path_entry_count) catch unreachable;
+                            values = allocator.alloc(u32, slow_path_entry_count) catch unreachable;
+                        }
+
+                        // @TODO For sparse codebooks this is very slow. We should implement a different path for sparse
+                        // codebooks.
+                        { // Compute codewords
+                            var sparse_count: usize = 0;
+                            var available_bits: [32]u32 = [_]u32{0} ** 32;
+                            // find the first one with a valid length i.e not VORBIS_NO_CODE
+                            var first_valid_symbol: u32 = 0;
+                            for (lengths, 0..) |length, i| {
+                                if (length != VORBIS_NO_CODE) {
+                                    first_valid_symbol = @truncate(i);
+                                    break;
+                                }
+                            }
+                            assert(lengths[first_valid_symbol] < 32);
+                            // Set the first symbol to be 0
+                            if (sparse_flag == 0) {
+                                codewords[first_valid_symbol] = 0;
+                            } else {
+                                codewords[sparse_count] = 0;
+                                codeword_lengths[sparse_count] = lengths[first_valid_symbol];
+                                values[sparse_count] = first_valid_symbol;
+                                sparse_count += 1;
+                            }
+                            // For all codewords that are less than and equal the first valid symbol's length cannot
+                            // start with zeros as the prefix. Eg. if the first valid symbol is 3 and we assign 000
+                            // to it in the previous step then length 1 codewords must start with 1 do must start with
+                            // 01 and the next symbol with length 3 must start with 001. And since the code is most significant
+                            // bit first we shift by 32 - length to get the prefix.
+                            {
+                                var index: usize = 1;
+                                while (index <= lengths[first_valid_symbol]) : (index += 1) {
+                                    available_bits[index] = @as(u32, 1) << @truncate(32 - index);
+                                }
+                            }
+                            for (first_valid_symbol + 1..codebook_entries) |i| {
+                                var length = lengths[i];
+                                if (length == VORBIS_NO_CODE) continue;
+                                assert(length < 32);
+                                // According to teh stb_vorbis comments though not provable we dont have more than 1
+                                // leaf node per level. So we can find the earliest available (i.e the lowest available)
+                                // leaf node to assign to this codeword.
+                                // eg. if the lengths are [3, 5] then 3 is assigned 000 and 5 is assigned 00100
+                                while (length > 0 and available_bits[length] == 0) {
+                                    length -= 1;
+                                }
+                                if (length == 0) {
+                                    return error.InvalidCodebookCannotFindPrefix;
+                                }
+                                // NOTE: Take the next available codeword at a particular length and assign it to the
+                                // current symbol. We then take every codeword at the length we assigned up to the
+                                // the actual length and set them to the next avaialbel codeword.
+                                // eg. if the lengths are [3, 5] and we assign 000 to 3 and 00100 to 5. We then set the next
+                                // available codewword for 3 to  be 010 (001 + 1), for 4 the next available will be 0011
+                                // and for 5 the next available will be 00101. To maintain the
+                                const result = available_bits[length];
+                                available_bits[length] = 0;
+                                if (sparse_flag == 0) {
+                                    codewords[i] = @bitReverse(result);
+                                } else {
+                                    codewords[sparse_count] = @bitReverse(result);
+                                    codeword_lengths[sparse_count] = lengths[i];
+                                    values[sparse_count] = @truncate(i);
+                                    sparse_count += 1;
+                                }
+                                if (length != lengths[i]) {
+                                    var index: usize = lengths[i];
+                                    while (index > length) : (index -= 1) {
+                                        assert(available_bits[index] == 0);
+                                        available_bits[index] = result + (@as(u32, 1) << @truncate(32 - index));
+                                    }
+                                }
+                            }
+                        }
+                        // @INCOMPLETE Create slow path table using the sorted_codewords that only contains the valid
+                        // codewords. When it is sparse we will just create one for all the valid symbols.
+                        // Only do this if there are sorted entries.
+                        const sorted_codewords: []u32 = allocator.alloc(u32, slow_path_entry_count + 1) catch unreachable;
+                        const sorted_values: []u32 = allocator.alloc(u32, slow_path_entry_count + 1) catch unreachable;
+                        sorted_values[0] = 0;
+                        { // Slow path
+                        }
+                        // NOTE: To decode the codewords we need a way to do a lookup given a bitstream of huffman
+                        // encoded data. For codes less than say 10 bits we can do a fast lookup table that just
+                        // has an O(1) lookup. For ones larger than 10 bits we can construct a symbol table that we
+                        // can do a slow search through.
+                        // TODO: Decide how big the fast huffman table should be
+                        const fast_huffman_table = allocator.alloc(i16, FAST_HUFFMAN_TABLE_SIZE) catch unreachable;
+                        { // Fast huffman table
+                            @memset(fast_huffman_table, -1);
+                            var entries: usize = if (sparse_flag == 1) slow_path_entry_count else codebook_entries;
+                            if (entries > std.math.maxInt(i16)) {
+                                entries = std.math.maxInt(i16);
+                            }
+                            for (0..entries) |i| {
+                                if (lengths[i] <= FAST_HUFFMAN_BITS) {
+                                    var length = if (sparse_flag == 1) @bitReverse(sorted_codewords[i]) else codewords[i];
+                                    while (length < FAST_HUFFMAN_TABLE_SIZE) {
+                                        fast_huffman_table[length] = @intCast(i);
+                                        length += @as(u32, 1) << @truncate(lengths[i]);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 },
                 else => {
                     // std.log.err("Audio packet", .{});
@@ -296,6 +498,7 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
     return intermediate_buffer;
 }
 
+const VORBIS_NO_CODE: u8 = 255;
 const VorbisIDPacket = extern struct {
     version: u32 align(1), // Must be 0
     audio_channels: u8 align(1), // Number of audio channels 1 for mono 2 for stereo
@@ -315,16 +518,11 @@ const VorbisCommentPacket = extern struct {
 
     pub const UserComment = extern struct {
         length: u32 align(1), // Length of the user comment
-        entry: [*]const u8 align(1), // User comment
+        entry: [*]const u8 align(1), // User commen
     };
 };
 
 const VorbisCodecSetupPacket = extern struct {};
-
-test "comment packet" {
-    std.log.err("ID packet size: {any}", .{@sizeOf(VorbisIDPacket)});
-    std.log.err("Comment packet size: {any}", .{@sizeOf(VorbisCommentPacket)});
-}
 
 const ParserState = enum(u8) {
     read_next_packet,
@@ -338,9 +536,27 @@ const DecoderState = union(ParserState) {
     parse_packet: []const u8,
 };
 
+/// The ”ilog(x)” function returns the position number (1 through n) of the highest set bit in the two’s complement
+/// integer value [x]. Values of [x] less than zero are defined to return zero.
+inline fn ilog(x: i32) u32 {
+    if (x <= 0) return 0;
+    return 32 - @clz(x);
+}
+
 test "ogg decode" {
-    const ogg_data = try std.fs.cwd().readFileAlloc("assets/sounds/footstep00.ogg", std.testing.allocator, .unlimited);
-    defer std.testing.allocator.free(ogg_data);
-    const ogg_data_decoded = try decode(std.testing.allocator, ogg_data);
-    defer std.testing.allocator.free(ogg_data_decoded);
+    const allocator = std.heap.page_allocator;
+    const ogg_data = try std.fs.cwd().readFileAlloc("assets/sounds/footstep00.ogg", allocator, .unlimited);
+    defer allocator.free(ogg_data);
+    const ogg_data_decoded = try decode(allocator, ogg_data);
+    defer allocator.free(ogg_data_decoded);
+}
+
+test "ilog" {
+    try std.testing.expectEqual(@as(u32, 0), ilog(0));
+    try std.testing.expectEqual(@as(u32, 1), ilog(1));
+    try std.testing.expectEqual(@as(u32, 2), ilog(2));
+    try std.testing.expectEqual(@as(u32, 2), ilog(3));
+    try std.testing.expectEqual(@as(u32, 3), ilog(4));
+    try std.testing.expectEqual(@as(u32, 3), ilog(7));
+    try std.testing.expectEqual(@as(u32, 0), ilog(-5));
 }

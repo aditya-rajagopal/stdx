@@ -9,21 +9,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
-    const lib = b.addLibrary(.{
-        .name = "zaudio",
-        .root_module = mod,
-        .linkage = .static,
-    });
-    const installed_lib = b.addInstallArtifact(lib, .{});
-    installed_lib.emitted_h = lib.getEmittedH();
-    b.getInstallStep().dependOn(&installed_lib.step);
-
-    const check_exe = b.addExecutable(.{
+    const test_exe = b.addTest(.{
         .name = "check",
         .root_module = mod,
     });
-    check_exe.root_module.addImport("test", mod);
+    // const run_tests = b.addRunArtifact(test_exe);
+
+    // const test_step = b.step("test", "Run the test executable");
+    // test_step.dependOn(&run_tests.step);
 
     const check_step = b.step("check", "Run the check executable");
-    check_step.dependOn(&check_exe.step);
+    check_step.dependOn(&test_exe.step);
 }
