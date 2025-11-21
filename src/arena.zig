@@ -77,19 +77,19 @@ pub fn pushAligned(
     comptime alignment: std.mem.Alignment,
 ) *align(alignment.toByteUnits()) T {
     const size = @sizeOf(T);
-    const ptr: *align(alignment.toByteUnits()) T = @ptrCast(self.rawAlloc(size, alignment));
+    const ptr: *align(alignment.toByteUnits()) T = @ptrCast(@alignCast(self.rawAlloc(size, alignment)));
     return @ptrCast(ptr);
 }
 
 pub fn push(self: *Arena, comptime T: type) *T {
     const size = @sizeOf(T);
-    const ptr: *T = @ptrCast(self.rawAlloc(size, .of(T)));
+    const ptr: *T = @ptrCast(@alignCast(self.rawAlloc(size, .of(T))));
     return @ptrCast(ptr);
 }
 
 pub fn pushArray(self: *Arena, comptime T: type, length: usize) []T {
-    const size = @sizeOf(T) * length;
-    const ptr: [*]T = @ptrCast(self.rawAlloc(size, .of(T)));
+    const size = std.math.mul(usize, @sizeOf(T), length) catch unreachable;
+    const ptr: [*]T = @ptrCast(@alignCast(self.rawAlloc(size, .of(T))));
     return ptr[0..length];
 }
 
@@ -99,7 +99,7 @@ pub fn pushArrayAligned(
     comptime alignment: std.mem.Alignment,
     length: usize,
 ) []align(alignment.toByteUnits()) T {
-    const size = @sizeOf(T) * length;
+    const size = std.math.mul(usize, @sizeOf(T), length) catch unreachable;
     const ptr: [*]align(alignment.toByteUnits()) T = @ptrCast(self.rawAlloc(size, alignment));
     return ptr[0..length];
 }
@@ -111,7 +111,7 @@ pub fn pushString(self: *Arena, str: []const u8) []u8 {
     return ptr[0..size];
 }
 
-pub fn rawAlloc(self: *Arena, n: usize, alignment: std.mem.Alignment) [*]u8 {
+pub fn rawAlloc(self: *Arena, n: usize, comptime alignment: std.mem.Alignment) [*]u8 {
     const ptr_align = alignment.toByteUnits();
     const base_address: usize = @intFromPtr(self.memory.ptr);
     const current_address: usize = base_address + self.current;

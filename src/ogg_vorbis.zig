@@ -1,6 +1,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+const Arena = @import("arena.zig");
+
 const BitStream = @import("bitstream.zig");
 
 const FourCC = packed struct(u32) {
@@ -76,7 +78,7 @@ const VORBIS_CODEC_SETUP_NO: u32 = 3;
 // which serial number to use for which type of stream.
 pub fn decode(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
     const start_state: DecoderState = .read_header;
-    // TODO: Arena allocator for intermediate buffers
+    var arena = try Arena.init(allocator, 8 * 4096, null);
 
     var read_head: []const u8 = data;
     // TODO: Do we want to parse this?
@@ -84,7 +86,6 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
     // var vorbis_comment_packet: VorbisCommentPacket = undefined;
 
     // TODO: Is there any way to avoid this allocation?
-    // PERF: Can we have a code path when the packets are contigous and not write to this buffer?
     // PERF: 4096 seems reasonable as a buffer for packets since we expect small packets when dealing with audio files.
     var packet_buffer = try std.ArrayList(u8).initCapacity(allocator, 4096);
     defer packet_buffer.deinit(allocator);
@@ -305,15 +306,32 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
                     var bitstream = BitStream.init(packet_read_head[7..]);
                     const codebook_count: usize = bitstream.consume(8) + 1;
                     const codebooks = allocator.alloc(Codebook, codebook_count) catch unreachable;
-                    // @TODO Pass in a temporary allocator/arena and reset it each loop
-                    for (codebooks, 0..) |*codebook, i| {
-                        std.log.err("codebook {d}", .{i});
-                        try Codebook.init(codebook, allocator, &bitstream);
-
-                        // @LEFTOFF getting some error on the lookup type parsing
-                        if (i == 36) {
-                            break; // HACK
+                    for (codebooks) |*codebook| {
+                        try codebook.init(allocator, &arena, &bitstream);
+                        // std.log.err("Arena memory used: {d}", .{arena.current});
+                        arena.reset(false);
+                    }
+                    // NOTE: Time domain transfers are not used
+                    const time_count: usize = bitstream.consume(6) + 1;
+                    for (0..time_count) |_| {
+                        const zero: u16 = @truncate(bitstream.consume(16));
+                        if (zero != 0) {
+                            return error.InvalidVorbisSetupPacket;
                         }
+                    }
+
+                    const floor_count: usize = bitstream.consume(6) + 1;
+                    for (0..floor_count) |i| {
+                        const floor_type: u16 = @truncate(bitstream.consume(16));
+                        std.log.err("Floor type[{}]: {d}", .{ i, floor_type });
+                        break;
+                        // switch (floor_type) {
+                        //     0 => {},
+                        //     1 => {},
+                        //     else => {
+                        //         return error.InvalidVorbisSetupPacket;
+                        //     },
+                        // }
                     }
                 },
                 else => {
@@ -346,7 +364,7 @@ const LookupType = enum(u8) {
 fn lookup1Values(dimension: u16, entries: u32) ?u32 {
     var result = @floor(@exp(@log(@as(f32, @floatFromInt(entries))) / @as(f32, @floatFromInt(dimension))));
     var test_next_int: i32 = @intFromFloat(@floor(std.math.pow(f32, result + 1, @floatFromInt(dimension))));
-    if (test_next_int < entries) {
+    if (test_next_int <= entries) {
         result += 1;
     }
     // @TODO I DONT KNOW WHY THIS IS NEEDED BUT STB VORBIS DOES IT. Look into it. I can see
@@ -395,7 +413,7 @@ const Codebook = struct {
     pub const FAST_HUFFMAN_TABLE_SIZE: usize = 1 << FAST_HUFFMAN_BITS;
 
     // @TODO Pass in a temporary allocator/arena
-    pub fn init(c: *Codebook, allocator: std.mem.Allocator, bitstream: *BitStream) Error!void {
+    pub fn init(c: *Codebook, allocator: std.mem.Allocator, arena: *Arena, bitstream: *BitStream) Error!void {
         // @TODO Should everything from the setup live in temporary storage since we dont need to
         // keep these around once we are done?
         const sync_pattern: u64 = bitstream.consume(24);
@@ -410,7 +428,7 @@ const Codebook = struct {
         c.sparse_flag = if (is_ordered == 0) bitstream.consume(1) == 1 else false;
 
         // @TODO This is a temporary allocation and should go on the arena
-        var lengths = try allocator.alloc(u8, c.entries);
+        var lengths = arena.pushArray(u8, c.entries);
 
         var total: usize = 0;
         if (is_ordered == 0) {
@@ -444,8 +462,8 @@ const Codebook = struct {
             }
         }
 
+        // NOTE: If there are enough entries that are valid treat it as non-sparse
         if (c.sparse_flag and total >= c.entries >> 2) {
-            // TODO: If there are enough entries that are valid treat it as non-sparse
             c.sparse_flag = false;
         }
 
@@ -467,16 +485,14 @@ const Codebook = struct {
         var values: []u32 = undefined;
         if (!c.sparse_flag) {
             c.codewords = allocator.alloc(u32, c.entries) catch unreachable;
-            c.codeword_lengths = lengths;
+            c.codeword_lengths = allocator.dupe(u8, lengths) catch unreachable;
         } else {
             // @TODO For sparse codebooks allocate only the number of entries that are valid
-            c.codewords = allocator.alloc(u32, c.slow_path_entry_count) catch unreachable;
+            c.codewords = arena.pushArray(u32, c.slow_path_entry_count);
             c.codeword_lengths = allocator.alloc(u8, c.slow_path_entry_count) catch unreachable;
-            values = allocator.alloc(u32, c.slow_path_entry_count) catch unreachable;
+            values = arena.pushArray(u32, c.slow_path_entry_count);
         }
 
-        // @TODO For sparse codebooks this is very slow. We should implement a different path for sparse
-        // codebooks.
         { // Compute codewords
             var sparse_count: usize = 0;
             var available_bits: [32]u32 = [_]u32{0} ** 32;
@@ -549,7 +565,7 @@ const Codebook = struct {
             }
         }
 
-        std.log.err("Slow path entry count: {d}, sparse flag: {any}", .{ c.slow_path_entry_count, c.sparse_flag });
+        // std.log.err("Slow path entry count: {d}, sparse flag: {any}", .{ c.slow_path_entry_count, c.sparse_flag });
 
         if (c.slow_path_entry_count > 0) {
             c.slow_path_table_codewords = allocator.alloc(u32, c.slow_path_entry_count + 1) catch unreachable;
@@ -610,17 +626,17 @@ const Codebook = struct {
                 }
             }
         }
-        // @TODO Once we are done with building the slow path we can free the codewords, values and
-        // the lengths arrays if the codebook is sparse
+
+        if (c.sparse_flag) {
+            c.codewords = &.{};
+        }
 
         // NOTE: To decode the codewords we need a way to do a lookup given a bitstream of huffman
         // encoded data. For codes less than say 10 bits we can do a fast lookup table that just
         // has an O(1) lookup. For ones larger than 10 bits we can construct a symbol table that we
         // can do a slow search through.
-        // TODO: Decide how big the fast huffman table should be
-        const fast_huffman_table = allocator.alloc(i16, FAST_HUFFMAN_TABLE_SIZE) catch unreachable;
         { // Fast huffman table
-            @memset(fast_huffman_table, -1);
+            @memset(&c.fast_huffman_table, -1);
             var entries: usize = if (c.sparse_flag) c.slow_path_entry_count else c.entries;
             if (entries > std.math.maxInt(i16)) {
                 entries = std.math.maxInt(i16);
@@ -629,7 +645,7 @@ const Codebook = struct {
                 if (lengths[i] <= FAST_HUFFMAN_BITS) {
                     var length = if (c.sparse_flag) @bitReverse(c.slow_path_table_codewords[i]) else c.codewords[i];
                     while (length < FAST_HUFFMAN_TABLE_SIZE) {
-                        fast_huffman_table[length] = @intCast(i);
+                        c.fast_huffman_table[length] = @intCast(i);
                         length += @as(u32, 1) << @truncate(lengths[i]);
                     }
                 }
@@ -652,7 +668,7 @@ const Codebook = struct {
                         c.dimension * c.entries;
                 assert(c.lookup_values > 0);
                 // @TODO This is a temporary allocation and should go on the arena
-                const multipliers = allocator.alloc(u16, c.lookup_values) catch unreachable;
+                const multipliers = arena.pushArray(u16, c.lookup_values);
                 for (multipliers) |*multiplier| {
                     const value: i64 = @bitCast(bitstream.consume(@truncate(c.value_bits)));
                     // @TODO If we reach the end of packet we need to return -1 as u32
