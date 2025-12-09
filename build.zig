@@ -4,12 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     // const optimize = b.standardOptimizeOption(.{});
 
-    const mod = b.addModule("zaudio", .{
-        .root_source_file = b.path("src/libzaudio.zig"),
+    const mod = b.addModule("stdx", .{
+        .root_source_file = b.path("src/stdx.zig"),
         .target = target,
     });
 
-    const test_exe = b.addTest(.{
+    const @"test" = b.addTest(.{
         .name = "check",
         .root_module = mod,
     });
@@ -19,5 +19,5 @@ pub fn build(b: *std.Build) void {
     // test_step.dependOn(&run_tests.step);
 
     const check_step = b.step("check", "Run the check executable");
-    check_step.dependOn(&test_exe.step);
+    check_step.dependOn(&@"test".step);
 }

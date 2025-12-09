@@ -1,7 +1,7 @@
 .{
-    .name = .zaudio,
+    .name = .stdx,
     .version = "0.0.0",
-    .fingerprint = 0xc5244e8c3da3c978, // Changing this has security and trust implications.
+    .fingerprint = 0x5479474f61c44124, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0-dev.923+06d9e3bc0",
     .dependencies = .{},
     .paths = .{
