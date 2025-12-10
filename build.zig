@@ -13,10 +13,10 @@ pub fn build(b: *std.Build) void {
         .name = "check",
         .root_module = mod,
     });
-    // const run_tests = b.addRunArtifact(test_exe);
+    const run_tests = b.addRunArtifact(@"test");
 
-    // const test_step = b.step("test", "Run the test executable");
-    // test_step.dependOn(&run_tests.step);
+    const test_step = b.step("test", "Run the test executable");
+    test_step.dependOn(&run_tests.step);
 
     const check_step = b.step("check", "Run the check executable");
     check_step.dependOn(&@"test".step);

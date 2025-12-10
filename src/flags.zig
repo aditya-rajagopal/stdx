@@ -14,6 +14,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+const logFatal = @import("stdx.zig").logFatal;
+
 const log = std.log.scoped(.args_parser);
 
 const MAX_ARGS = 128;
@@ -585,9 +587,4 @@ fn defaultValue(comptime field: std.builtin.Type.StructField) ?field.type {
         @as(*const field.type, @ptrCast(@alignCast(default_opaque))).*
     else
         null;
-}
-
-fn logFatal(comptime format: []const u8, args: anytype) noreturn {
-    log.err(format, args);
-    std.process.exit(1);
 }

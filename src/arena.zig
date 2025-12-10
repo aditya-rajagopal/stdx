@@ -5,6 +5,8 @@ const Allocator = std.mem.Allocator;
 
 const Arena = @This();
 
+const logFatal = @import("stdx.zig").logFatal;
+
 // @TODO should there be an ability to reallocate or resize allocations?
 
 memory: []u8,
@@ -119,7 +121,15 @@ pub fn rawAlloc(self: *Arena, n: usize, comptime alignment: std.mem.Alignment) [
     const aligned_index: usize = self.current + (aligned_address - current_address);
     const new_index: usize = aligned_index + n;
 
+    // @NOTE: This check in debug build will crash the program. In release builds it will
+    // take the path that prints a fatal error message and exits the program. Use
+    // std.heap.FixedBufferAllocator to avoid this.
     assert(new_index <= self.memory.len);
+    if (new_index > self.memory.len) {
+        @branchHint(.cold);
+        std.debug.dumpCurrentStackTrace(.{});
+        logFatal("Arena: out of memory", .{});
+    }
 
     const result = self.memory[aligned_index..new_index];
     self.current = new_index;
