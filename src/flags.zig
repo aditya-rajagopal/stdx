@@ -9,8 +9,6 @@
 //! * I added help flags to commands in addition to the help flag for the program
 //! * I prefer the zig style nameing convention for function names as i like to do things like `const default_value = defaultValue(xyz);`
 //! * Added floating point numbers
-//!
-//! error messages.
 
 // @TODO: Add tests
 const std = @import("std");
@@ -19,6 +17,7 @@ const assert = std.debug.assert;
 const log = std.log.scoped(.args_parser);
 
 const MAX_ARGS = 128;
+const flag_parse_function_name = "parseFlagValue";
 
 /// Parse CLI arguments for subcommands specified as Zig `struct` or `union(enum)`:
 ///
@@ -26,17 +25,31 @@ const MAX_ARGS = 128;
 /// const CLIArgs = union(enum) {
 ///    init: struct {
 ///        bare: bool = false,
+///        custom: struct {
+///            bool_value: bool,
+///
+///            pub fn parseFlagValue(flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!bool {
+///                if (std.mem.eql(u8, flag_value, "true")) {
+///                    return true;
+///                } else if (std.mem.eql(u8, flag_value, "false")) {
+///                    return false;
+///                }
+///                error_out.* = "Expected 'true' or 'false'";
+///                return error.Invalid;
+///            }
+///        },
 ///        positional: struct {
 ///            directory: ?[]const u8 = null,
 ///        },
 ///
 ///        pub const help =
-///            \\Usage: program init [--bare] [<directory>]
+///            \\Usage: program init [--bare] --custom=["true"|"false"] [<directory>]
 ///            \\
 ///            \\Description
 ///            \\
 ///            \\Options:
 ///            \\  --bare  Creates a bare project without subfolders and tracking files.
+///            \\  --custom  A custom flag that is not supported by the default parser. Also it has no default value which makes it required while parsing.
 ///            \\  <directory>  The directory to initialize the project in. Defaults to the current directory.
 ///            \\
 ///         ;
@@ -47,7 +60,7 @@ const MAX_ARGS = 128;
 ///        \\
 ///        \\    program [-h | --help]
 ///        \\
-///        \\    program init [-h | --help] [--bare] [<directory>]
+///        \\    program init [-h | --help] [--bare] --custom=["true"|"false"] [<directory>]
 ///        \\
 ///        \\Commands:
 ///        \\    init  Initializes a new program project in the current directory or the specified directory.
@@ -62,64 +75,35 @@ const MAX_ARGS = 128;
 /// const cli_args: CLIArgs = parse_commands(&args, CLIArgs);
 /// ```
 ///
-/// `positional` field is treated specially, it designates positional arguments.
+/// The parser supports by default the following types:
+/// * bool
+/// * integers
+/// * floats
+/// * enums
+/// * []const u8 and [:0]const u8
+/// * optionals of the above types
+///
+/// `positional` field is treated specially, it designates positional arguments and must have the field name `positional` and must be a struct.
 ///
 /// If `pub const help` declaration is present, it is used to implement `-h/--help` argument.
 ///
-/// @TODO Value parsing can be customized on per-type basis via `parse_flag_value` customization point.
-/// @TODO More documentation for the requirements of `ArgType`.
+/// If the flag has a custom type that is not supported with the default parsing options. It is possible to
+/// assign the field a type which has a function named `parseFlagValue` and contains the data you need.
+/// The function must have the following signature:
+///     fn (flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!FlagType;
+/// Where:
+///     flag_value: The parsed value of command line argument
+///     error_out: A pointer to a string describing the error. If the function returns an error this parameter must be set to a string describing the error.
+///
+/// @IMPORTANT Requrements for this function:
+///     1. It must return an error if the value is determined to be invalid.
+///     2. If it returns an error it must set the error_out parameter to a string describing the error. The flag parser
+///     will not free the memory of the string so it is recommended to use a statically allocated string.
+///     3. If parsed value is returned the error_out paramater must remain null.
 pub fn parseArgs(args: *std.process.ArgIterator, comptime ArgType: type) ArgType {
     // @NOTE: Skip the first argument, which is the program name.
     assert(args.skip());
     return parseFlags(args, ArgType);
-}
-
-fn parseCommand(args: *std.process.ArgIterator, comptime Command: type) Command {
-    const info = @typeInfo(Command);
-    if (info != .@"union") {
-        @compileError("Expected union type, found '" ++ @typeName(Command) ++ "' when parsing command");
-    }
-
-    const command: []const u8 = args.next() orelse {
-        // @TODO print help
-        if (@hasDecl(Command, "help")) {
-            var interface = std.fs.File.stdout().writer(&.{}).interface;
-            interface.writeAll(Command.help) catch std.process.exit(1);
-            interface.writeAll("\n") catch std.process.exit(1);
-        }
-        logFatal("Expected a command", .{});
-    };
-
-    // @NOTE If you want to add a help flag to your command, add the following to the command struct:
-    // pub const help =
-    //     \\Usage: command [--help]
-    //     \\
-    //     \\Description of the command.
-    //     \\
-    //     \\Options:
-    //     \\  --help  Prints this help message.
-    // ;
-    //
-    // It ***MUST*** be a marked pub to be visable to print.
-    if (@hasDecl(Command, "help")) {
-        if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
-            var interface = std.fs.File.stdout().writer(&.{}).interface;
-            interface.writeAll(Command.help) catch std.process.exit(1);
-            std.process.exit(0);
-        }
-    }
-
-    inline for (info.@"union".fields) |field| {
-        if (std.mem.eql(u8, field.name, command)) {
-            return @unionInit(
-                Command,
-                field.name,
-                parseFlags(args, field.type),
-            );
-        }
-    }
-    logFatal("Unknown command '{s}'", .{command});
-    unreachable;
 }
 
 fn parseFlags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
@@ -298,6 +282,62 @@ fn parseFlags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
     return result;
 }
 
+fn parseCommand(args: *std.process.ArgIterator, comptime Command: type) Command {
+    const info = @typeInfo(Command);
+    if (info != .@"union") {
+        @compileError("Expected union type, found '" ++ @typeName(Command) ++ "' when parsing command");
+    }
+    if (info.@"union".fields.len == 0) {
+        @compileError("Expected at least 1 field in union type '" ++ @typeName(Command) ++ "' when parsing command");
+    }
+    // @TODO Should there be enforcement that if command has only 1 field then it should have been a struct?
+    //       This would be a compile error. But i personally dont think it is a good idea especially when you are developing
+    //       a cli. You dont have all the commands in at the start. If only there was a compile warning for this.
+    if (info.@"union".fields.len == 1) {
+        log.warn("Command union '{s}' only has 1 field. This should probably be a struct", .{@typeName(Command)});
+    }
+
+    const command: []const u8 = args.next() orelse {
+        if (@hasDecl(Command, "help")) {
+            var interface = std.fs.File.stdout().writer(&.{}).interface;
+            interface.writeAll(Command.help) catch std.process.exit(1);
+            interface.writeAll("\n") catch std.process.exit(1);
+        }
+        logFatal("Expected a command", .{});
+    };
+
+    // @NOTE If you want to add a help flag to your command, add the following to the command struct:
+    // pub const help =
+    //     \\Usage: command [--help]
+    //     \\
+    //     \\Description of the command.
+    //     \\
+    //     \\Options:
+    //     \\  --help  Prints this help message.
+    // ;
+    //
+    // It ***MUST*** be a marked pub to be visable to print.
+    if (@hasDecl(Command, "help")) {
+        if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
+            var interface = std.fs.File.stdout().writer(&.{}).interface;
+            interface.writeAll(Command.help) catch std.process.exit(1);
+            std.process.exit(0);
+        }
+    }
+
+    inline for (info.@"union".fields) |field| {
+        if (std.mem.eql(u8, field.name, command)) {
+            return @unionInit(
+                Command,
+                field.name,
+                parseFlags(args, field.type),
+            );
+        }
+    }
+    logFatal("Unknown command '{s}'", .{command});
+    unreachable;
+}
+
 fn parseFlag(comptime Flag: type, flag_name: []const u8, arg: [:0]const u8) Flag {
     assert(flag_name[0] == '-');
     assert(flag_name[1] == '-');
@@ -375,6 +415,29 @@ fn parseFlagValue(comptime Flag: type, flag_name: []const u8, flag_value: [:0]co
                 .{ flag_name, flag_value, @typeName(Value), valid_values },
             );
         };
+    }
+
+    if (@hasDecl(Value, flag_parse_function_name)) {
+        const ParseFn = fn (flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!Value;
+        const parse_fn: ParseFn = @field(Value, flag_parse_function_name);
+        var error_out: ?[]const u8 = null;
+        // @IMPORTANT Requrements for parse_fn:
+        //     1. It must return an error if the value is determined to be invalid.
+        //     2. If it returns an error it must set the error_out parameter to a string describing the error. The flag parser
+        //     will not free the memory of the string so it is recommended to use a statically allocated string.
+        //     3. If parsed value is returned the error_out paramater must remain null.
+        const value = parse_fn(flag_value, &error_out) catch |err| switch (err) {
+            error.Invalid => {
+                if (error_out) |err_out| {
+                    logFatal("Flag '{s}': value '{s}' is not a valid value for type '{s}' to parse: {s}", .{ flag_name, flag_value, @typeName(Value), err_out });
+                }
+            },
+            else => unreachable,
+        };
+        if (error_out) |err_out| {
+            logFatal("Flag '{s}' of type '{s}' returned diagnostics for error without returning an error: {s}", .{ flag_name, @typeName(Value), err_out });
+        }
+        return value;
     }
 
     comptime unreachable;
@@ -471,6 +534,9 @@ fn parseStructFields(comptime Flags: type) struct {
 
 fn checkField(comptime field: std.builtin.Type.StructField, @"struct": type) void {
     if (field.type == []const u8 or @typeInfo(field.type) == .int or @typeInfo(field.type) == .float) {
+        return;
+    }
+    if (@hasDecl(@"struct", flag_parse_function_name)) {
         return;
     }
 
