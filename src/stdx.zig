@@ -24,7 +24,7 @@ pub fn logFatal(comptime format: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 
-// https://github.com/tigerbeetle/tigerbeetle/blob/16d62f0ce7d4ef3db58714c9b7a0c46480c19bc3/src/stdx.zig#L985
+// Modified from https://github.com/tigerbeetle/tigerbeetle/blob/16d62f0ce7d4ef3db58714c9b7a0c46480c19bc3/src/stdx.zig#L985
 pub const DateTimeUTC = packed struct(u64) {
     year: u16,
     month: u8,
@@ -34,13 +34,18 @@ pub const DateTimeUTC = packed struct(u64) {
     second: u6,
     millisecond: u10,
 
+    pub const Format = enum {
+        YYYYMMDD_HHMMSS,
+        @"YYYYMMDD_HHMMSS.fff",
+    };
+
     pub fn now() DateTimeUTC {
         const timestamp_ms = std.time.milliTimestamp();
         assert(timestamp_ms > 0);
-        return DateTimeUTC.from_timestamp_ms(@intCast(timestamp_ms));
+        return DateTimeUTC.fromTimestampMs(@intCast(timestamp_ms));
     }
 
-    pub fn from_timestamp_ms(timestamp_ms: u64) DateTimeUTC {
+    pub fn fromTimestampMs(timestamp_ms: u64) DateTimeUTC {
         const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @divTrunc(timestamp_ms, 1000) };
         const year_day = epoch_seconds.getEpochDay().calculateYearDay();
         const month_day = year_day.calculateMonthDay();
@@ -55,6 +60,62 @@ pub const DateTimeUTC = packed struct(u64) {
             .second = time.getSecondsIntoMinute(),
             .millisecond = @intCast(@mod(timestamp_ms, 1000)),
         };
+    }
+
+    pub fn fromString(str: []const u8, date_format: Format) DateTimeUTC {
+        switch (date_format) {
+            .YYYYMMDD_HHMMSS => {
+                assert(str.len >= 15);
+                assert(str[8] == '_');
+                const year = try std.fmt.parseInt(u16, str[0..4], 10);
+                const month = try std.fmt.parseInt(u8, str[4..6], 10);
+                assert(month <= 12 and month >= 1);
+                const day = try std.fmt.parseInt(u8, str[6..8], 10);
+                assert(day <= 31 and day >= 1);
+                const hour = try std.fmt.parseInt(u8, str[9..11], 10);
+                assert(hour <= 23 and hour >= 0);
+                const minute = try std.fmt.parseInt(u8, str[11..13], 10);
+                assert(minute <= 59 and minute >= 0);
+                const second = try std.fmt.parseInt(u8, str[13..15], 10);
+                assert(second <= 59 and second >= 0);
+                return DateTimeUTC{
+                    .year = year,
+                    .month = month,
+                    .day = day,
+                    .hour = hour,
+                    .minute = minute,
+                    .second = second,
+                    .millisecond = 0,
+                };
+            },
+            .@"YYYYMMDD_HHMMSS.fff" => {
+                assert(str.len >= 19);
+                assert(str[8] == '_');
+                assert(str[16] == '.');
+                const year = try std.fmt.parseInt(u16, str[0..4], 10);
+                const month = try std.fmt.parseInt(u8, str[4..6], 10);
+                assert(month <= 12 and month >= 1);
+                const day = try std.fmt.parseInt(u8, str[6..8], 10);
+                assert(day <= 31 and day >= 1);
+                const hour = try std.fmt.parseInt(u8, str[9..11], 10);
+                assert(hour <= 23 and hour >= 0);
+                const minute = try std.fmt.parseInt(u8, str[11..13], 10);
+                assert(minute <= 59 and minute >= 0);
+                const second = try std.fmt.parseInt(u8, str[13..15], 10);
+                assert(second <= 59 and second >= 0);
+                const millisecond = try std.fmt.parseInt(u10, str[16..19], 10);
+                assert(millisecond <= 999 and millisecond >= 0);
+                return DateTimeUTC{
+                    .year = year,
+                    .month = month,
+                    .day = day,
+                    .hour = hour,
+                    .minute = minute,
+                    .second = second,
+                    .millisecond = millisecond,
+                };
+            },
+        }
     }
 
     pub fn format(
