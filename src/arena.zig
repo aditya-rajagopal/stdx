@@ -113,7 +113,7 @@ pub fn pushString(self: *Arena, str: []const u8) []u8 {
     return ptr[0..size];
 }
 
-pub fn rawAlloc(self: *Arena, n: usize, comptime alignment: std.mem.Alignment) [*]u8 {
+pub fn rawAlloc(self: *Arena, n: usize, alignment: std.mem.Alignment) [*]u8 {
     const ptr_align = alignment.toByteUnits();
     const base_address: usize = @intFromPtr(self.memory.ptr);
     const current_address: usize = base_address + self.current;
