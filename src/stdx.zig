@@ -62,22 +62,33 @@ pub const DateTimeUTC = packed struct(u64) {
         };
     }
 
-    pub fn fromString(str: []const u8, date_format: Format) DateTimeUTC {
+    pub const DateTimeUTCFromStringError = error{
+        IncorrectStringLength,
+        InvalidYear,
+        InvalidMonth,
+        InvalidDay,
+        InvalidHour,
+        InvalidMinute,
+        InvalidSecond,
+        InvalidMillisecond,
+        InvalidDateFormat,
+    };
+    pub fn fromString(str: []const u8, date_format: Format) DateTimeUTCFromStringError!DateTimeUTC {
         switch (date_format) {
             .YYYYMMDD_HHMMSS => {
-                assert(str.len >= 15);
-                assert(str[8] == '_');
+                if (str.len != 15) return error.InvalidDateFormat;
+                if (str[8] != '_') return error.InvalidDateFormat;
                 const year = try std.fmt.parseInt(u16, str[0..4], 10);
                 const month = try std.fmt.parseInt(u8, str[4..6], 10);
-                assert(month <= 12 and month >= 1);
+                if (month > 12 or month < 1) return error.InvalidMonth;
                 const day = try std.fmt.parseInt(u8, str[6..8], 10);
-                assert(day <= 31 and day >= 1);
+                if (day > 31 or day < 1) return error.InvalidDay;
                 const hour = try std.fmt.parseInt(u8, str[9..11], 10);
-                assert(hour <= 23 and hour >= 0);
+                if (hour > 23 or hour < 0) return error.InvalidHour;
                 const minute = try std.fmt.parseInt(u8, str[11..13], 10);
-                assert(minute <= 59 and minute >= 0);
+                if (minute > 59 or minute < 0) return error.InvalidMinute;
                 const second = try std.fmt.parseInt(u8, str[13..15], 10);
-                assert(second <= 59 and second >= 0);
+                if (second > 59 or second < 0) return error.InvalidSecond;
                 return DateTimeUTC{
                     .year = year,
                     .month = month,
@@ -89,22 +100,22 @@ pub const DateTimeUTC = packed struct(u64) {
                 };
             },
             .@"YYYYMMDD_HHMMSS.fff" => {
-                assert(str.len >= 19);
-                assert(str[8] == '_');
-                assert(str[16] == '.');
+                if (str.len != 19) return error.IncorrectStringLength;
+                if (str[8] != '_') return error.InvalidDateFormat;
+                if (str[16] != '.') return error.InvalidDateFormat;
                 const year = try std.fmt.parseInt(u16, str[0..4], 10);
                 const month = try std.fmt.parseInt(u8, str[4..6], 10);
-                assert(month <= 12 and month >= 1);
+                if (month > 12 or month < 1) return error.InvalidMonth;
                 const day = try std.fmt.parseInt(u8, str[6..8], 10);
-                assert(day <= 31 and day >= 1);
+                if (day > 31 or day < 1) return error.InvalidDay;
                 const hour = try std.fmt.parseInt(u8, str[9..11], 10);
-                assert(hour <= 23 and hour >= 0);
+                if (hour > 23 or hour < 0) return error.InvalidHour;
                 const minute = try std.fmt.parseInt(u8, str[11..13], 10);
-                assert(minute <= 59 and minute >= 0);
+                if (minute > 59 or minute < 0) return error.InvalidMinute;
                 const second = try std.fmt.parseInt(u8, str[13..15], 10);
-                assert(second <= 59 and second >= 0);
+                if (second > 59 or second < 0) return error.InvalidSecond;
                 const millisecond = try std.fmt.parseInt(u10, str[16..19], 10);
-                assert(millisecond <= 999 and millisecond >= 0);
+                if (millisecond > 999 or millisecond < 0) return error.InvalidMillisecond;
                 return DateTimeUTC{
                     .year = year,
                     .month = month,
