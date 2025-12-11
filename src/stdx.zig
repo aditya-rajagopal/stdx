@@ -37,7 +37,9 @@ pub const DateTimeUTC = packed struct(u64) {
     pub const Format = enum {
         YYYYMMDD_HHMMSS,
         @"YYYYMMDD_HHMMSS.fffZ",
+        @"YYYYMMDD_HHMMSS.fff",
         @"YYYY-MM-DDTHH:MM:SSZ",
+        @"YYYY-MM-DDTHH:MM:SS",
     };
 
     pub fn now() DateTimeUTC {
@@ -100,8 +102,8 @@ pub const DateTimeUTC = packed struct(u64) {
                     .millisecond = 0,
                 };
             },
-            .@"YYYYMMDD_HHMMSS.fffZ" => {
-                if (str.len != 19) return error.IncorrectStringLength;
+            .@"YYYYMMDD_HHMMSS.fff", .@"YYYYMMDD_HHMMSS.fffZ" => {
+                if (str.len < 19) return error.IncorrectStringLength;
                 if (str[8] != '_') return error.InvalidDateFormat;
                 if (str[16] != '.') return error.InvalidDateFormat;
                 const year = std.fmt.parseInt(u16, str[0..4], 10) catch return error.InvalidYear;
@@ -127,8 +129,8 @@ pub const DateTimeUTC = packed struct(u64) {
                     .millisecond = millisecond,
                 };
             },
-            .@"YYYY-MM-DDTHH:MM:SSZ" => {
-                if (str.len != 19) return error.IncorrectStringLength;
+            .@"YYYY-MM-DDTHH:MM:SS", .@"YYYY-MM-DDTHH:MM:SSZ" => {
+                if (str.len < 19) return error.IncorrectStringLength;
                 if (str[4] != '-') return error.InvalidDateFormat;
                 if (str[7] != '-') return error.InvalidDateFormat;
                 if (str[10] != 'T') return error.InvalidDateFormat;
@@ -188,6 +190,17 @@ pub const DateTimeUTC = packed struct(u64) {
                             self.data.second,
                         });
                     },
+                    .@"YYYYMMDD_HHMMSS.fff" => {
+                        try writer.print("{d:0>4}{d:0>2}{d:0>2}_{d:0>2}{d:0>2}{d:0>2}.{d:0>3}", .{
+                            self.data.year,
+                            self.data.month,
+                            self.data.day,
+                            self.data.hour,
+                            self.data.minute,
+                            self.data.second,
+                            self.data.millisecond,
+                        });
+                    },
                     .@"YYYYMMDD_HHMMSS.fffZ" => {
                         try writer.print("{d:0>4}{d:0>2}{d:0>2}_{d:0>2}{d:0>2}{d:0>2}.{d:0>3}Z", .{
                             self.data.year,
@@ -197,6 +210,16 @@ pub const DateTimeUTC = packed struct(u64) {
                             self.data.minute,
                             self.data.second,
                             self.data.millisecond,
+                        });
+                    },
+                    .@"YYYY-MM-DDTHH:MM:SS" => {
+                        try writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{
+                            self.data.year,
+                            self.data.month,
+                            self.data.day,
+                            self.data.hour,
+                            self.data.minute,
+                            self.data.second,
                         });
                     },
                     .@"YYYY-MM-DDTHH:MM:SSZ" => {
@@ -239,6 +262,12 @@ test "DateTimeUTC.as" {
     _ = writer.consumeAll();
     try writer.print("{f}", .{date_time.as(.@"YYYY-MM-DDTHH:MM:SSZ")});
     try std.testing.expectEqualStrings("2022-01-01T01:01:01Z", writer.buffered());
+    _ = writer.consumeAll();
+    try writer.print("{f}", .{date_time.as(.@"YYYY-MM-DDTHH:MM:SS")});
+    try std.testing.expectEqualStrings("2022-01-01T01:01:01", writer.buffered());
+    _ = writer.consumeAll();
+    try writer.print("{f}", .{date_time.as(.@"YYYYMMDD_HHMMSS.fff")});
+    try std.testing.expectEqualStrings("20220101_010101.000", writer.buffered());
     _ = writer.consumeAll();
     try writer.print("{f}", .{date_time});
     try std.testing.expectEqualStrings("2022-01-01T01:01:01.000Z", writer.buffered());
