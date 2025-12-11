@@ -323,7 +323,7 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
                     const floor_count: usize = bitstream.consume(6) + 1;
                     for (0..floor_count) |i| {
                         const floor_type: u16 = @truncate(bitstream.consume(16));
-                        std.log.err("Floor type[{}]: {d}", .{ i, floor_type });
+                        std.log.info("Floor type[{}]: {d}", .{ i, floor_type });
                         switch (floor_type) {
                             0 => {},
                             1 => {},

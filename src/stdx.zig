@@ -36,7 +36,8 @@ pub const DateTimeUTC = packed struct(u64) {
 
     pub const Format = enum {
         YYYYMMDD_HHMMSS,
-        @"YYYYMMDD_HHMMSS.fff",
+        @"YYYYMMDD_HHMMSS.fffZ",
+        @"YYYY-MM-DDTHH:MM:SSZ",
     };
 
     pub fn now() DateTimeUTC {
@@ -78,16 +79,16 @@ pub const DateTimeUTC = packed struct(u64) {
             .YYYYMMDD_HHMMSS => {
                 if (str.len != 15) return error.InvalidDateFormat;
                 if (str[8] != '_') return error.InvalidDateFormat;
-                const year = try std.fmt.parseInt(u16, str[0..4], 10);
-                const month = try std.fmt.parseInt(u8, str[4..6], 10);
+                const year = std.fmt.parseInt(u16, str[0..4], 10) catch return error.InvalidYear;
+                const month = std.fmt.parseInt(u8, str[4..6], 10) catch return error.InvalidMonth;
                 if (month > 12 or month < 1) return error.InvalidMonth;
-                const day = try std.fmt.parseInt(u8, str[6..8], 10);
+                const day = std.fmt.parseInt(u8, str[6..8], 10) catch return error.InvalidDay;
                 if (day > 31 or day < 1) return error.InvalidDay;
-                const hour = try std.fmt.parseInt(u8, str[9..11], 10);
+                const hour = std.fmt.parseInt(u8, str[9..11], 10) catch return error.InvalidHour;
                 if (hour > 23 or hour < 0) return error.InvalidHour;
-                const minute = try std.fmt.parseInt(u8, str[11..13], 10);
+                const minute = std.fmt.parseInt(u8, str[11..13], 10) catch return error.InvalidMinute;
                 if (minute > 59 or minute < 0) return error.InvalidMinute;
-                const second = try std.fmt.parseInt(u8, str[13..15], 10);
+                const second = std.fmt.parseInt(u6, str[13..15], 10) catch return error.InvalidSecond;
                 if (second > 59 or second < 0) return error.InvalidSecond;
                 return DateTimeUTC{
                     .year = year,
@@ -99,22 +100,22 @@ pub const DateTimeUTC = packed struct(u64) {
                     .millisecond = 0,
                 };
             },
-            .@"YYYYMMDD_HHMMSS.fff" => {
+            .@"YYYYMMDD_HHMMSS.fffZ" => {
                 if (str.len != 19) return error.IncorrectStringLength;
                 if (str[8] != '_') return error.InvalidDateFormat;
                 if (str[16] != '.') return error.InvalidDateFormat;
-                const year = try std.fmt.parseInt(u16, str[0..4], 10);
-                const month = try std.fmt.parseInt(u8, str[4..6], 10);
+                const year = std.fmt.parseInt(u16, str[0..4], 10) catch return error.InvalidYear;
+                const month = std.fmt.parseInt(u8, str[4..6], 10) catch return error.InvalidMonth;
                 if (month > 12 or month < 1) return error.InvalidMonth;
-                const day = try std.fmt.parseInt(u8, str[6..8], 10);
+                const day = std.fmt.parseInt(u8, str[6..8], 10) catch return error.InvalidDay;
                 if (day > 31 or day < 1) return error.InvalidDay;
-                const hour = try std.fmt.parseInt(u8, str[9..11], 10);
+                const hour = std.fmt.parseInt(u8, str[9..11], 10) catch return error.InvalidHour;
                 if (hour > 23 or hour < 0) return error.InvalidHour;
-                const minute = try std.fmt.parseInt(u8, str[11..13], 10);
+                const minute = std.fmt.parseInt(u8, str[11..13], 10) catch return error.InvalidMinute;
                 if (minute > 59 or minute < 0) return error.InvalidMinute;
-                const second = try std.fmt.parseInt(u8, str[13..15], 10);
+                const second = std.fmt.parseInt(u6, str[13..15], 10) catch return error.InvalidSecond;
                 if (second > 59 or second < 0) return error.InvalidSecond;
-                const millisecond = try std.fmt.parseInt(u10, str[16..19], 10);
+                const millisecond = std.fmt.parseInt(u10, str[16..19], 10) catch return error.InvalidMillisecond;
                 if (millisecond > 999 or millisecond < 0) return error.InvalidMillisecond;
                 return DateTimeUTC{
                     .year = year,
@@ -126,6 +127,34 @@ pub const DateTimeUTC = packed struct(u64) {
                     .millisecond = millisecond,
                 };
             },
+            .@"YYYY-MM-DDTHH:MM:SSZ" => {
+                if (str.len != 19) return error.IncorrectStringLength;
+                if (str[4] != '-') return error.InvalidDateFormat;
+                if (str[7] != '-') return error.InvalidDateFormat;
+                if (str[10] != 'T') return error.InvalidDateFormat;
+                if (str[13] != ':') return error.InvalidDateFormat;
+                if (str[16] != ':') return error.InvalidDateFormat;
+                const year = std.fmt.parseInt(u16, str[0..4], 10) catch return error.InvalidYear;
+                const month = std.fmt.parseInt(u8, str[5..7], 10) catch return error.InvalidMonth;
+                if (month > 12 or month < 1) return error.InvalidMonth;
+                const day = std.fmt.parseInt(u8, str[8..10], 10) catch return error.InvalidDay;
+                if (day > 31 or day < 1) return error.InvalidDay;
+                const hour = std.fmt.parseInt(u8, str[11..13], 10) catch return error.InvalidHour;
+                if (hour > 23 or hour < 0) return error.InvalidHour;
+                const minute = std.fmt.parseInt(u8, str[14..16], 10) catch return error.InvalidMinute;
+                if (minute > 59 or minute < 0) return error.InvalidMinute;
+                const second = std.fmt.parseInt(u6, str[17..19], 10) catch return error.InvalidSecond;
+                if (second > 59 or second < 0) return error.InvalidSecond;
+                return DateTimeUTC{
+                    .year = year,
+                    .month = month,
+                    .day = day,
+                    .hour = hour,
+                    .minute = minute,
+                    .second = second,
+                    .millisecond = 0,
+                };
+            },
         }
     }
 
@@ -133,7 +162,7 @@ pub const DateTimeUTC = packed struct(u64) {
         datetime: DateTimeUTC,
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
-        try writer.print("{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+        try writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
             datetime.year,
             datetime.month,
             datetime.day,
@@ -144,6 +173,51 @@ pub const DateTimeUTC = packed struct(u64) {
         });
     }
 
+    pub fn DateFormat(comptime fmt: Format) type {
+        return struct {
+            data: DateTimeUTC,
+            pub inline fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+                switch (fmt) {
+                    .YYYYMMDD_HHMMSS => {
+                        try writer.print("{d:0>4}{d:0>2}{d:0>2}_{d:0>2}{d:0>2}{d:0>2}", .{
+                            self.data.year,
+                            self.data.month,
+                            self.data.day,
+                            self.data.hour,
+                            self.data.minute,
+                            self.data.second,
+                        });
+                    },
+                    .@"YYYYMMDD_HHMMSS.fffZ" => {
+                        try writer.print("{d:0>4}{d:0>2}{d:0>2}_{d:0>2}{d:0>2}{d:0>2}.{d:0>3}Z", .{
+                            self.data.year,
+                            self.data.month,
+                            self.data.day,
+                            self.data.hour,
+                            self.data.minute,
+                            self.data.second,
+                            self.data.millisecond,
+                        });
+                    },
+                    .@"YYYY-MM-DDTHH:MM:SSZ" => {
+                        try writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+                            self.data.year,
+                            self.data.month,
+                            self.data.day,
+                            self.data.hour,
+                            self.data.minute,
+                            self.data.second,
+                        });
+                    },
+                }
+            }
+        };
+    }
+
+    pub fn as(self: DateTimeUTC, comptime fmt: Format) DateFormat(fmt) {
+        return .{ .data = self };
+    }
+
     pub fn dateAsNumber(self: DateTimeUTC) u32 {
         return @as(u32, self.year) * 10000 + @as(u32, self.month) * 100 + @as(u32, self.day);
     }
@@ -152,6 +226,23 @@ pub const DateTimeUTC = packed struct(u64) {
         return @as(u32, self.hour) * 10000 + @as(u32, self.minute) * 100 + @as(u32, self.second);
     }
 };
+
+test "DateTimeUTC.as" {
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const date_time = try DateTimeUTC.fromString("20220101_010101", .YYYYMMDD_HHMMSS);
+    try writer.print("{f}", .{date_time.as(.YYYYMMDD_HHMMSS)});
+    try std.testing.expectEqualStrings("20220101_010101", writer.buffered());
+    _ = writer.consumeAll();
+    try writer.print("{f}", .{date_time.as(.@"YYYYMMDD_HHMMSS.fffZ")});
+    try std.testing.expectEqualStrings("20220101_010101.000Z", writer.buffered());
+    _ = writer.consumeAll();
+    try writer.print("{f}", .{date_time.as(.@"YYYY-MM-DDTHH:MM:SSZ")});
+    try std.testing.expectEqualStrings("2022-01-01T01:01:01Z", writer.buffered());
+    _ = writer.consumeAll();
+    try writer.print("{f}", .{date_time});
+    try std.testing.expectEqualStrings("2022-01-01T01:01:01.000Z", writer.buffered());
+}
 
 test {
     std.testing.refAllDecls(@This());

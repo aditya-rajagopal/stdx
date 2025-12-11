@@ -185,10 +185,4 @@ test "wav decode" {
     const wav_data_encoded = try encode(std.testing.allocator, wav_data_decoded);
     defer std.testing.allocator.free(wav_data_encoded);
     try std.fs.cwd().writeFile(.{ .sub_path = "test_out.wav", .data = wav_data_encoded, .flags = .{} });
-
-    std.log.err("first bytes: {any}", .{wav_data_decoded.data[0..10]});
-}
-
-test "size" {
-    std.log.err("wav size: {any}", .{@sizeOf(FormatChunk)});
 }
