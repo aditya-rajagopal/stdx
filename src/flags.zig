@@ -551,10 +551,11 @@ fn parseStructFields(comptime Flags: type) struct {
 }
 
 fn checkField(comptime field: std.builtin.Type.StructField, @"struct": type) void {
-    if (field.type == []const u8 or @typeInfo(field.type) == .int or @typeInfo(field.type) == .float) {
+    if (field.type == []const u8 or field.type == [:0]const u8 or @typeInfo(field.type) == .int or @typeInfo(field.type) == .float) {
         return;
     }
-    if (@hasDecl(field.type, flag_parse_function_name)) {
+
+    if (@typeInfo(field.type) == .@"struct" and @hasDecl(field.type, flag_parse_function_name)) {
         return;
     }
 
@@ -574,7 +575,7 @@ fn checkField(comptime field: std.builtin.Type.StructField, @"struct": type) voi
         const info = @typeInfo(field.type).optional;
         const child = @typeInfo(info.child);
 
-        if (info.child == []const u8 or child == .int or child == .float) {
+        if (info.child == []const u8 or info.child == [:0]const u8 or child == .int or child == .float) {
             return;
         }
         if (child == .@"enum") {
@@ -586,6 +587,10 @@ fn checkField(comptime field: std.builtin.Type.StructField, @"struct": type) voi
                 const err = std.fmt.comptimePrint("Field '" ++ field.name ++ "' in struct '" ++ @typeName(@"struct") ++ "' of type '" ++ @typeName(field.type) ++ "' must have at least 2 possible enum values. Has {}", .{info_enum.fields.len});
                 @compileError(err);
             }
+            return;
+        }
+
+        if (@typeInfo(info.child) == .@"struct" and @hasDecl(info.child, flag_parse_function_name)) {
             return;
         }
     }
