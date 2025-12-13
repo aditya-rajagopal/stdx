@@ -120,7 +120,7 @@ pub fn parseArgs(
     // @NOTE This is the only entry point into parsing the arguments so local_gpa will always be set before
     // any calls to custom parseFlagValue functions.
     local_gpa = gpa;
-    return parseFlags(gpa, args, ArgType);
+    return parseFlags(args, ArgType);
 }
 
 fn parseFlags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
