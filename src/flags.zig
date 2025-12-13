@@ -554,7 +554,7 @@ fn checkField(comptime field: std.builtin.Type.StructField, @"struct": type) voi
     if (field.type == []const u8 or @typeInfo(field.type) == .int or @typeInfo(field.type) == .float) {
         return;
     }
-    if (@hasDecl(@"struct", flag_parse_function_name)) {
+    if (@hasDecl(field.type, flag_parse_function_name)) {
         return;
     }
 
