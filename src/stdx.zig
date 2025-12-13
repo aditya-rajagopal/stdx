@@ -20,7 +20,7 @@ pub const options: Options = if (@hasDecl(root, "stdx_options")) root.stdx_optio
 
 pub fn logFatal(comptime format: []const u8, args: anytype) noreturn {
     var stderr = std.fs.File.stderr().writer(&.{});
-    stderr.interface.print("ERROR: " ++ format, args) catch {};
+    stderr.interface.print("ERROR: " ++ format ++ "\n", args) catch {};
     std.process.exit(1);
 }
 
