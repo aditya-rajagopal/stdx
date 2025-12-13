@@ -124,6 +124,7 @@ pub fn parseArgs(
 }
 
 fn parseFlags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
+    @setEvalBranchQuota(5_000);
     if (Flags == void) {
         if (args.next()) |arg| {
             logFatal("Unexpected argument '{s}'", .{arg});
