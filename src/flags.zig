@@ -445,13 +445,12 @@ fn parseFlagValue(comptime Flag: type, flag_name: []const u8, flag_value: [:0]co
         //     will not free the memory of the string so it is recommended to use a statically allocated string.
         //     3. If parsed value is returned the error_out paramater must remain null.
         //     4. If the parseFlagValue function allocates memory it is up to the user to handle the lifetime of the memory.
-        const value = parse_fn(local_gpa, flag_value, &error_out) catch |err| switch (err) {
-            error.Invalid => {
-                if (error_out) |err_out| {
-                    logFatal("Flag '{s}': value '{s}' is not a valid value for type '{s}' to parse: {s}", .{ flag_name, flag_value, @typeName(Value), err_out });
-                }
-            },
-            else => unreachable,
+        const value = parse_fn(local_gpa, flag_value, &error_out) catch {
+            if (error_out) |err_out| {
+                logFatal("Flag '{s}': value '{s}' is not a valid value for type '{s}' to parse: {s}", .{ flag_name, flag_value, @typeName(Value), err_out });
+            } else {
+                logFatal("Flag '{s}': returned error.Invalid but did not set error_out. This is illegal behaviour.", .{flag_name});
+            }
         };
         if (error_out) |err_out| {
             logFatal("Flag '{s}' of type '{s}' returned diagnostics for error without returning an error: {s}", .{ flag_name, @typeName(Value), err_out });
