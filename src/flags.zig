@@ -21,6 +21,8 @@ const log = std.log.scoped(.args_parser);
 const MAX_ARGS = 128;
 const flag_parse_function_name = "parseFlagValue";
 
+var local_gpa: std.mem.Allocator = undefined;
+
 /// Parse CLI arguments for subcommands specified as Zig `struct` or `union(enum)`:
 ///
 /// ```
@@ -30,7 +32,8 @@ const flag_parse_function_name = "parseFlagValue";
 ///        custom: struct {
 ///            bool_value: bool,
 ///
-///            pub fn parseFlagValue(flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!bool {
+///            pub fn parseFlagValue(gpa: std.mem.Allocator, flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!bool {
+///                _ = gpa;
 ///                if (std.mem.eql(u8, flag_value, "true")) {
 ///                    return true;
 ///                } else if (std.mem.eql(u8, flag_value, "false")) {
@@ -92,8 +95,9 @@ const flag_parse_function_name = "parseFlagValue";
 /// If the flag has a custom type that is not supported with the default parsing options. It is possible to
 /// assign the field a type which has a function named `parseFlagValue` and contains the data you need.
 /// The function must have the following signature:
-///     fn (flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!FlagType;
+///     fn (gpa: std.mem.Allocator, flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!FlagType;
 /// Where:
+///     gpa: Allocator to be used by the parseFlagValue function. The user is responsible for managing the lifetime of the memory allocated by the parseFlagValue function.
 ///     flag_value: The parsed value of command line argument
 ///     error_out: A pointer to a string describing the error. If the function returns an error this parameter must be set to a string describing the error.
 ///
@@ -102,10 +106,21 @@ const flag_parse_function_name = "parseFlagValue";
 ///     2. If it returns an error it must set the error_out parameter to a string describing the error. The flag parser
 ///     will not free the memory of the string so it is recommended to use a statically allocated string.
 ///     3. If parsed value is returned the error_out paramater must remain null.
-pub fn parseArgs(args: *std.process.ArgIterator, comptime ArgType: type) ArgType {
+///     4. If the parseFlagValue function allocates memory it is up to the user to handle the lifetime of the memory.
+pub fn parseArgs(
+    /// Allocator used to forward to the parseFlagValue function of the custom types in case they need to allocate memory for their own needs.
+    /// The user is responsible for managing the lifetime of the memory allocated by the parseFlagValue function.
+    gpa: std.mem.Allocator,
+    args: *std.process.ArgIterator,
+    /// The type of the arguments to parse. Must be a struct or union
+    comptime ArgType: type,
+) ArgType {
     // @NOTE: Skip the first argument, which is the program name.
     assert(args.skip());
-    return parseFlags(args, ArgType);
+    // @NOTE This is the only entry point into parsing the arguments so local_gpa will always be set before
+    // any calls to custom parseFlagValue functions.
+    local_gpa = gpa;
+    return parseFlags(gpa, args, ArgType);
 }
 
 fn parseFlags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
@@ -420,7 +435,7 @@ fn parseFlagValue(comptime Flag: type, flag_name: []const u8, flag_value: [:0]co
     }
 
     if (@hasDecl(Value, flag_parse_function_name)) {
-        const ParseFn = fn (flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!Value;
+        const ParseFn = fn (gpa: std.mem.Allocator, flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!Value;
         const parse_fn: ParseFn = @field(Value, flag_parse_function_name);
         var error_out: ?[]const u8 = null;
         // @IMPORTANT Requrements for parse_fn:
@@ -428,7 +443,8 @@ fn parseFlagValue(comptime Flag: type, flag_name: []const u8, flag_value: [:0]co
         //     2. If it returns an error it must set the error_out parameter to a string describing the error. The flag parser
         //     will not free the memory of the string so it is recommended to use a statically allocated string.
         //     3. If parsed value is returned the error_out paramater must remain null.
-        const value = parse_fn(flag_value, &error_out) catch |err| switch (err) {
+        //     4. If the parseFlagValue function allocates memory it is up to the user to handle the lifetime of the memory.
+        const value = parse_fn(local_gpa, flag_value, &error_out) catch |err| switch (err) {
             error.Invalid => {
                 if (error_out) |err_out| {
                     logFatal("Flag '{s}': value '{s}' is not a valid value for type '{s}' to parse: {s}", .{ flag_name, flag_value, @typeName(Value), err_out });
@@ -574,12 +590,11 @@ fn checkField(comptime field: std.builtin.Type.StructField, @"struct": type) voi
         }
     }
 
-    @compileError(
-        "Field '" ++ field.name ++
-            "' in struct '" ++ @typeName(@"struct") ++
-            "' of type '" ++ @typeName(field.type) ++
-            "' is unsupported. Must be an integer or []const u8",
-    );
+    @compileError("Field '" ++ field.name ++
+        "' in struct '" ++ @typeName(@"struct") ++
+        "' of type '" ++ @typeName(field.type) ++
+        "' is unsupported. Must be an integer, []const u8, enum, or optional of one of these types." ++
+        "For custom types please wrap it in a struct with a `" ++ flag_parse_function_name ++ "` function.");
 }
 
 fn defaultValue(comptime field: std.builtin.Type.StructField) ?field.type {
