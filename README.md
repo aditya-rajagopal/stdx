@@ -43,7 +43,7 @@ const stdx = @import("stdx");
 
 Parse CLI arguments for subcommands specified as Zig `struct` or `union(enum)`:
 
-```
+```zig
 const stdx = @import("stdx");
 const flags = stdx.flags;
 
@@ -158,7 +158,7 @@ If `pub const help` declaration is present, it is used to implement `-h/--help` 
 If the flag has a custom type that is not supported with the default parsing options. It is possible to
 assign the field a type which has a function named `parseFlagValue` and contains the data you need.
 The function must have the following signature:
-```
+```zig
 /// gpa: Allocator to be used by the parseFlagValue function. The user is responsible for managing the lifetime of the memory allocated by the parseFlagValue function.
 /// flag_value: The parsed value of command line argument
 /// error_out: A pointer to a string describing the error. If the function returns an error this parameter must be set to a string describing the error.
