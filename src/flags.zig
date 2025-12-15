@@ -26,67 +26,112 @@ var local_gpa: std.mem.Allocator = undefined;
 /// Parse CLI arguments for subcommands specified as Zig `struct` or `union(enum)`:
 ///
 /// ```
+/// const stdx = @import("stdx");
+/// const flags = stdx.flags;
+///
 /// const CLIArgs = union(enum) {
-///    init: struct {
-///        bare: bool = false,
-///        custom: struct {
-///            bool_value: bool,
+///     init: struct {
+///         bare: bool = false,
+///         integer: i32 = 0,
+///         enum_value: enum { foo, bar } = .foo,
+///         positional: struct {
+///             directory: ?[]const u8 = null,
+///         },
 ///
-///            pub fn parseFlagValue(gpa: std.mem.Allocator, flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!bool {
-///                _ = gpa;
-///                if (std.mem.eql(u8, flag_value, "true")) {
-///                    return true;
-///                } else if (std.mem.eql(u8, flag_value, "false")) {
-///                    return false;
-///                }
-///                error_out.* = "Expected 'true' or 'false'";
-///                return error.Invalid;
-///            }
-///        },
-///        positional: struct {
-///            directory: ?[]const u8 = null,
-///        },
+///         pub const help =
+///             \\Usage: program init [--bare] [--integer=<integer>] [--enum=<foo|bar>] <directory>
+///             \\
+///             \\Description
+///             \\
+///             \\Options:
+///             \\  --bare  Creates a bare project without subfolders and tracking files.
+///             \\  --integer  An integer flag
+///             \\  --enum  An enum flag
+///             \\  <directory>  The directory to initialize the project in. Defaults to the current directory.
+///             \\
+///          ;
+///     },
+///     another: struct {
+///         foo: struct {
+///             list: []const []const u8,
 ///
-///        pub const help =
-///            \\Usage: program init [--bare] --custom=["true"|"false"] [<directory>]
-///            \\
-///            \\Description
-///            \\
-///            \\Options:
-///            \\  --bare  Creates a bare project without subfolders and tracking files.
-///            \\  --custom  A custom flag that is not supported by the default parser. Also it has no default value which makes it required while parsing.
-///            \\  <directory>  The directory to initialize the project in. Defaults to the current directory.
-///            \\
+///             pub fn parseFlagValue(gpa: std.mem.Allocator, flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!@This() {
+///                 if (flag_value.len == 0) {
+///                     error_out.* = "Empty list";
+///                     return error.Invalid;
+///                 }
+///                 const count: usize = std.mem.countScalar(u8, flag_value, ',');
+///                 var items = std.mem.splitScalar(u8, flag_value, ',');
+///                 const list = gpa.alloc([]const u8, count + 1) catch {
+///                     error_out.* = "Failed to allocate list";
+///                     return error.Invalid;
+///                 };
+///                 errdefer gpa.free(tag_list);
+///
+///                 for (0..count + 1) |index| {
+///                     const item = items.next().?;
+///                     if (item.len == 0) {
+///                         error_out.* = "Empty item in list";
+///                         return error.Invalid;
+///                     }
+///                     list[index] = item;
+///                 }
+///                 return .{ .list = list };
+///             }
+///         }
+///
+///         pub const help =
+///             \\Usage: program another --foo="<item1>,<item2>,..."
+///             \\
+///             \\Description
+///             \\
+///             \\Options:
+///             \\  --foo  A foo flag with a list of items
+///             \\
 ///         ;
-///    },
+///     },
 ///
-///    pub const help =
-///        \\Usage:
-///        \\
-///        \\    program [-h | --help]
-///        \\
-///        \\    program init [-h | --help] [--bare] --custom=["true"|"false"] [<directory>]
-///        \\
-///        \\Commands:
-///        \\    init  Initializes a new program project in the current directory or the specified directory.
-///        \\
-///        \\Options:
-///        \\    -h, --help
-///        \\        Prints this help message.
-///        \\
-///     ;
+///
+///     pub const help =
+///         \\Usage:
+///         \\
+///         \\    program [-h | --help]
+///         \\
+///         \\    program init [-h | --help] [--bare] [--integer=<integer>] [--enum=<foo|bar>] <directory>
+///         \\
+///         \\    program another [-h | --help] --foo="<item1>,<item2>,..."
+///         \\
+///         \\Commands:
+///         \\    init     Some init command
+///         \\    another  Another command
+///         \\
+///         \\Options:
+///         \\    -h, --help
+///         \\        Prints this help message.
+///         \\
+///      ;
 /// }
 ///
-/// const cli_args: CLIArgs = parse_commands(&args, CLIArgs);
+/// pub fn main() !void {
+///     const args = try std.process.argsAlloc(std.heap.page_allocator);
+///     defer std.process.argsFree(std.heap.page_allocator, args);
+///
+///
+///     const cli_args: CLIArgs = parse_commands(&args, CLIArgs);
+///     switch (cli_args) {
+///         .init => |init_args| { ... },
+///         .something => |something_args| { ... },
+///     }
+/// }
 /// ```
 ///
 /// The parser supports by default the following types:
-/// * bool
-/// * integers
+/// * `bool`
+/// * integers (`u8` - `u128`, `i8` - `i128`)
 /// * floats
-/// * enums
-/// * []const u8 and [:0]const u8
-/// * optionals of the above types
+/// * `enum`
+/// * `[]const u8` and `[:0]const u8`
+/// * `optional` of the above types
 ///
 /// `positional` field is treated specially, it designates positional arguments and must have the field name `positional` and must be a struct.
 ///
@@ -95,18 +140,22 @@ var local_gpa: std.mem.Allocator = undefined;
 /// If the flag has a custom type that is not supported with the default parsing options. It is possible to
 /// assign the field a type which has a function named `parseFlagValue` and contains the data you need.
 /// The function must have the following signature:
-///     fn (gpa: std.mem.Allocator, flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!FlagType;
-/// Where:
-///     gpa: Allocator to be used by the parseFlagValue function. The user is responsible for managing the lifetime of the memory allocated by the parseFlagValue function.
-///     flag_value: The parsed value of command line argument
-///     error_out: A pointer to a string describing the error. If the function returns an error this parameter must be set to a string describing the error.
+/// ```
+/// /// gpa: Allocator to be used by the parseFlagValue function. The user is responsible for managing the lifetime of the memory allocated by the parseFlagValue function.
+/// /// flag_value: The parsed value of command line argument
+/// /// error_out: A pointer to a string describing the error. If the function returns an error this parameter must be set to a string describing the error.
+/// /// FlagType: The type of the flag it is parsing usually @This()
+/// struct {
+///     pub fn parseFlagValue(gpa: std.mem.Allocator, flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!@This() {}
+/// }
+/// ```
 ///
 /// @IMPORTANT Requrements for this function:
-///     1. It must return an error if the value is determined to be invalid.
-///     2. If it returns an error it must set the error_out parameter to a string describing the error. The flag parser
-///     will not free the memory of the string so it is recommended to use a statically allocated string.
-///     3. If parsed value is returned the error_out paramater must remain null.
-///     4. If the parseFlagValue function allocates memory it is up to the user to handle the lifetime of the memory.
+/// 1. It must return an error if the value is determined to be invalid.
+/// 2. If it returns an error it must set the error_out parameter to a string describing the error. The flag parser
+/// will not free the memory of the string so it is recommended to use a statically allocated string.
+/// 3. If parsed value is returned the error_out paramater must remain null.
+/// 4. If the parseFlagValue function allocates memory it is up to the user to handle the lifetime of the memory.
 pub fn parseArgs(
     /// Allocator used to forward to the parseFlagValue function of the custom types in case they need to allocate memory for their own needs.
     /// The user is responsible for managing the lifetime of the memory allocated by the parseFlagValue function.
