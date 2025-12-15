@@ -211,7 +211,8 @@ fn parseFlags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
         const arg = args.next() orelse break :parsing_next_arg;
         if (@hasDecl(Flags, "help") and parsed_args == 0) {
             if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-                var interface = std.fs.File.stdout().writer(&.{}).interface;
+                var stdout = std.fs.File.stdout().writer(&.{});
+                const interface = &stdout.interface;
                 interface.writeAll(Flags.help) catch std.process.exit(1);
                 interface.writeAll("\n") catch std.process.exit(1);
                 std.process.exit(0);
@@ -317,7 +318,8 @@ fn parseCommand(args: *std.process.ArgIterator, comptime Command: type) Command 
 
     const command: []const u8 = args.next() orelse {
         if (@hasDecl(Command, "help")) {
-            var interface = std.fs.File.stdout().writer(&.{}).interface;
+            var stdout = std.fs.File.stdout().writer(&.{});
+            const interface = &stdout.interface;
             interface.writeAll(Command.help) catch std.process.exit(1);
             interface.writeAll("\n") catch std.process.exit(1);
         }
@@ -337,7 +339,8 @@ fn parseCommand(args: *std.process.ArgIterator, comptime Command: type) Command 
     // It ***MUST*** be a marked pub to be visable to print.
     if (@hasDecl(Command, "help")) {
         if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
-            var interface = std.fs.File.stdout().writer(&.{}).interface;
+            var stdout = std.fs.File.stdout().writer(&.{});
+            const interface = &stdout.interface;
             interface.writeAll(Command.help) catch std.process.exit(1);
             std.process.exit(0);
         }
