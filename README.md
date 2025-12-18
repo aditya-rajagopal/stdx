@@ -39,6 +39,16 @@ const stdx = @import("stdx");
 
 ## Modules
 
+- [flags](#flags)
+- [Arena](#arena)
+- [Image](#image)
+  - [PNG](#png)
+- [Audio](#audio)
+  - [WAV](#wav)
+  - [OGG Vorbis](#ogg-vorbis)
+- [BitStream](#bitstream)
+- [Date & Time](#date--time)
+
 ### flags
 
 Parse CLI arguments for subcommands specified as Zig `struct` or `union(enum)`:
@@ -204,11 +214,46 @@ pub fn main() !void {
 }
 ```
 
+## Image
+
+### PNG
+Full support for decoding PNG files.
+> ⚠️ Though this is mostly complete, there are still tests that need to be written and the parser verified.
+>    This is tracked in the [issue](.gila/todo/chubby_koi_gqx/chubby_koi_gqx.md).
+
+```zig
+const stdx = @import("stdx");
+const png = stdx.png;
+
+pub fn main() !void {
+    const file = std.fs.cwd().openFile("assets/test.png", .{}) catch unreachable;
+    defer file.close();
+    var diagnostic: ?[]const u8 = null;
+    // Allocate some reasonable amount of memory for the image parser to use to store
+    // the raw data and the uncompressed image data before filtering and converting to RGBA.
+    // A decent rule of thumb is to have atleast 4 * width * height * channels bytes of memory for the arena.
+    var arena = try stdx.Arena.init(std.heap.page_allocator, 16 * 1024 * 1024, null);
+    defer arena.deinit(std.heap.page_allocator);
+    // The actual image data is stored in the General Purpose Array List (GPA) allocator and not on the arena.
+    // This makes the arena safe to reuse and/or deallocate after the image is parsed.
+    const image = try png.read(file, &arena, std.heap.page_allocator, &diagnostic, .default);
+    defer std.heap.page_allocator.free(image.data);
+
+    std.log.info("Width: {d}", .{image.width});
+    std.log.info("Height: {d}", .{image.height});
+    std.log.info("Channels: {d}", .{image.channels});
+    std.log.info("Data: {s}", .{image.data});
+}
+```
+
 ## Audio
 
 Utilities for reading and writing audio formats.
 
-- WAV: Full support for decoding and encoding WAV files (PCM and IEEE Float).
+### WAV
+Full support for decoding and encoding WAV files (PCM and IEEE Float).
+
+> ⚠️ This is mostly complete but there are still tests that need to be written.
 
 ```zig
 const wav = stdx.wav;
@@ -221,7 +266,9 @@ defer allocator.free(wav_data.data);
 const encoded_bytes = try wav.encode(allocator, wav_data);
 ```
 
-- OGG Vorbis: Work In Progress. An implementation of an OGG Vorbis decoder exists but is currently incomplete.
+### OGG Vorbis
+
+> ⚠️ This is work in progress. An implementation of an OGG Vorbis decoder exists but is currently incomplete.
 
 ## BitStream
 
