@@ -1,9 +1,4 @@
-///! @TODO More tests
-///! @TODO Add support for
-///        * 16bit per channel images
-///        * Paletted images
-///        * Interlaced images
-///        * Parsing form memory
+///! @TODO[[bowed_path_6n3]]
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -44,7 +39,7 @@ pub const PNGError = error{ParseFailed} || std.mem.Allocator.Error || Zlib.ZlibE
 /// Please use https://github.com/nothings/stb/blob/master/stb_image.h for a more complete PNG parser and for writing PNG files.
 ///
 /// This is mostly as an exercise and to have a native zig PNG parser. It will become feature complete in the future.
-pub fn parseFile(
+pub fn fromFile(
     file: std.fs.File,
     /// Used for allocating intermediate buffers which can safely be discarded after the image has parsed.
     /// This arena should be large enough to hold the raw png data, the deflated image data and 2 scanlines of the image.
@@ -60,12 +55,59 @@ pub fn parseFile(
 ) PNGError!Image {
     const BufferSize = 4096 * 4;
     comptime {
-        assert(BufferSize > 8);
+        assert(BufferSize > 4096);
     }
-    var temp_buffer: []u8 = arena.pushArrayAligned(u8, .fromByteUnits(4096), BufferSize);
+    const temp_buffer: []u8 = arena.pushArrayAligned(u8, .fromByteUnits(4096), BufferSize);
     var file_reader = file.reader(temp_buffer);
     const reader = &file_reader.interface;
+    return parse(reader, arena, gpa, diagnostic, config);
+}
 
+pub fn fromMemory(
+    /// The memory that is to be used to stream the PNG file data
+    memory: []const u8,
+    /// Used for allocating intermediate buffers which can safely be discarded after the image has parsed.
+    /// This arena should be large enough to hold the raw png data, the deflated image data and 2 scanlines of the image.
+    /// Recommendation: expected_width * expected_height * num_channels * 4 bytes.
+    arena: *stdx.Arena,
+    /// The allocator used for the final image data. This data must be freed by the user.
+    gpa: std.mem.Allocator,
+    /// Optional diagnostic string. If not null and stdx_options.detailed_diagnostics_png is true, the parser will add
+    /// extra diagnostic information to the pointer when an error occurs.
+    diagnostic: ?*?[]const u8,
+    /// The configuration for the image parser.
+    comptime config: ImageLoadConfig,
+) PNGError!Image {
+    var reader = std.Io.Reader.fixed(memory);
+    return parse(&reader, arena, gpa, diagnostic, config);
+}
+
+/// Parse a PNG file from a reader
+///
+/// @IMPORTANT This function has the following restrictions:
+/// * 8bit per channel images only
+/// * Non interlaced images
+/// * Non paletted images
+/// * Only parses the IHDR, IDAT and IEND chunks. Skips any other chunks.
+///
+/// Please use https://github.com/nothings/stb/blob/master/stb_image.h for a more complete PNG parser and for writing PNG files.
+///
+/// This is mostly as an exercise and to have a native zig PNG parser. It will become feature complete in the future.
+pub fn parse(
+    /// The reader that is to be used to stream the PNG file data
+    reader: *std.Io.Reader,
+    /// Used for allocating intermediate buffers which can safely be discarded after the image has parsed.
+    /// This arena should be large enough to hold the raw png data, the deflated image data and 2 scanlines of the image.
+    /// Recommendation: expected_width * expected_height * num_channels * 4 bytes.
+    arena: *stdx.Arena,
+    /// The allocator used for the final image data. This data must be freed by the user.
+    gpa: std.mem.Allocator,
+    /// Optional diagnostic string. If not null and stdx_options.detailed_diagnostics_png is true, the parser will add
+    /// extra diagnostic information to the pointer when an error occurs.
+    diagnostic: ?*?[]const u8,
+    /// The configuration for the image parser.
+    comptime config: ImageLoadConfig,
+) PNGError!Image {
     const info, const compressed = try parseChunks(reader, arena, diagnostic);
 
     var deflated = try Zlib.deflate(compressed, arena, info, diagnostic);
@@ -211,14 +253,15 @@ pub fn parseFile(
         }
     }
 
+    const temp_buffer = arena.pushPages(1);
     if (comptime config.flip_vertical_on_load) {
         for (0..info.height >> 1) |row| {
             var row0 = out_data[row * width_stride ..];
             var row1 = out_data[(info.height - row - 1) * width_stride ..];
 
-            var bytes_to_write = width_stride;
+            var bytes_to_write: usize = width_stride;
             while (bytes_to_write > 0) {
-                const current_copy = if (bytes_to_write <= 4096) bytes_to_write else 4096;
+                const current_copy = if (bytes_to_write <= temp_buffer.len) bytes_to_write else temp_buffer.len;
                 @memcpy(temp_buffer[0..current_copy], row0[0..current_copy]);
                 @memcpy(row0[0..current_copy], row1[0..current_copy]);
                 @memcpy(row1[0..current_copy], temp_buffer[0..current_copy]);
@@ -244,7 +287,7 @@ test "readPNG" {
     var diagnostic: ?[]const u8 = null;
     var arena = try stdx.Arena.init(std.testing.allocator, 16 * 1024 * 1024, null);
     defer arena.deinit(std.testing.allocator);
-    const image = parseFile(file, &arena, std.testing.allocator, &diagnostic, .default) catch {
+    const image = fromFile(file, &arena, std.testing.allocator, &diagnostic, .default) catch {
         std.debug.print("Error: {s}\n", .{diagnostic.?});
         return error.ParseFailed;
     };

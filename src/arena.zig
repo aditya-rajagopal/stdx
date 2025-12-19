@@ -57,6 +57,15 @@ pub fn reset(self: *Arena, comptime zero_memory: bool) void {
     self.end_index = 0;
 }
 
+pub fn rewind(self: *Arena, position: usize) void {
+    assert(position <= self.end_index);
+    self.end_index = position;
+}
+
+pub inline fn currentPosition(self: Arena) usize {
+    return self.end_index;
+}
+
 pub inline fn remainingCapacity(self: Arena) usize {
     return self.memory.len - self.end_index;
 }
@@ -89,6 +98,13 @@ pub fn pushArray(self: *Arena, comptime T: type, length: usize) []T {
     return ptr[0..length];
 }
 
+pub fn pushPages(self: *Arena, num_pages: usize) []u8 {
+    const alignment = std.heap.pageSize();
+    const size = num_pages * alignment;
+    const ptr: [*]u8 = self.rawAlloc(size, .fromByteUnits(alignment));
+    return ptr[0..size];
+}
+
 pub fn pushArrayAligned(
     self: *Arena,
     comptime T: type,
@@ -109,6 +125,23 @@ pub fn pushString(self: *Arena, str: []const u8) []u8 {
     return ptr[0..size];
 }
 
+pub fn dupe(self: *Arena, comptime T: type, m: []const T) []T {
+    const bytes = std.mem.sliceAsBytes(m);
+    const new_buf: [*]align(@alignOf(T)) u8 = @ptrCast(self.rawAlloc(bytes.len, .of(T)));
+    @memcpy(new_buf[0..bytes.len], bytes);
+    return std.mem.bytesAsSlice(T, new_buf[0..bytes.len]);
+}
+
+pub fn pop(self: *Arena, comptime T: type, ptr: *T) void {
+    const buf = std.mem.asBytes(ptr);
+    self.rawFree(buf);
+}
+
+pub fn popArray(self: *Arena, comptime T: type, buf: []T) void {
+    const buf_bytes = std.mem.sliceAsBytes(buf);
+    self.rawFree(buf_bytes);
+}
+
 fn rawAlloc(self: *Arena, n: usize, alignment: std.mem.Alignment) [*]u8 {
     const ptr_align = alignment.toByteUnits();
     const base_address: usize = @intFromPtr(self.memory.ptr);
@@ -124,7 +157,7 @@ fn rawAlloc(self: *Arena, n: usize, alignment: std.mem.Alignment) [*]u8 {
     if (new_index > self.memory.len) {
         @branchHint(.cold);
         std.debug.dumpCurrentStackTrace(.{});
-        logFatal("Arena: out of memory", .{});
+        logFatal("Arena: out of memory use a larger capacity or std.heap.ArenaAllocator", .{});
     }
 
     const result = self.memory[aligned_index..new_index];
@@ -132,30 +165,38 @@ fn rawAlloc(self: *Arena, n: usize, alignment: std.mem.Alignment) [*]u8 {
     return result.ptr;
 }
 
-fn resize(
-    ctx: *anyopaque,
-    buf: []u8,
-    alignment: Alignment,
+pub fn resize(
+    self: *Arena,
+    comptime T: type,
+    buf: []T,
     new_size: usize,
-    return_address: usize,
 ) bool {
+    const buffer = std.mem.sliceAsBytes(buf);
+    return rawResize(self, buffer, new_size * @sizeOf(T));
+}
+
+fn zigResize(ctx: *anyopaque, buf: []u8, alignment: Alignment, new_len: usize, return_address: usize) bool {
     const self: *Arena = @ptrCast(@alignCast(ctx));
     _ = alignment;
     _ = return_address;
+    return resize(self, u8, buf, new_len);
+}
+
+fn rawResize(self: *Arena, buf: []u8, new_len: usize) bool {
     assert(@inComptime() or self.ownsSlice(buf));
 
     if (!self.isLastAllocation(buf)) {
-        if (new_size > buf.len) return false;
+        if (new_len > buf.len) return false;
         return true;
     }
 
-    if (new_size <= buf.len) {
-        const sub = buf.len - new_size;
+    if (new_len <= buf.len) {
+        const sub = buf.len - new_len;
         self.end_index -= sub;
         return true;
     }
 
-    const add = new_size - buf.len;
+    const add = new_len - buf.len;
     if (add + self.end_index > self.memory.len) return false;
 
     self.end_index += add;
@@ -169,10 +210,10 @@ fn remap(
     new_len: usize,
     return_address: usize,
 ) ?[*]u8 {
-    return if (resize(context, memory, alignment, new_len, return_address)) memory.ptr else null;
+    return if (zigResize(context, memory, alignment, new_len, return_address)) memory.ptr else null;
 }
 
-pub fn free(
+fn zigFree(
     ctx: *anyopaque,
     buf: []u8,
     alignment: Alignment,
@@ -181,6 +222,13 @@ pub fn free(
     const self: *Arena = @ptrCast(@alignCast(ctx));
     _ = alignment;
     _ = return_address;
+    rawFree(self, buf);
+}
+
+fn rawFree(
+    self: *Arena,
+    buf: []u8,
+) void {
     assert(@inComptime() or self.ownsSlice(buf));
 
     if (self.isLastAllocation(buf)) {
@@ -194,9 +242,9 @@ pub fn allocator(self: *Arena) Allocator {
         .ptr = self,
         .vtable = &.{
             .alloc = zigAlloc,
-            .resize = resize,
+            .resize = zigResize,
             .remap = remap,
-            .free = free,
+            .free = zigFree,
         },
     };
 }
@@ -232,10 +280,10 @@ fn sliceContainsSlice(container: []u8, slice: []u8) bool {
         (@intFromPtr(slice.ptr) + slice.len) <= (@intFromPtr(container.ptr) + container.len);
 }
 
-var test_fixed_buffer_allocator_memory: [800000 * @sizeOf(u64)]u8 = undefined;
+var test_arena_memory: [800000 * @sizeOf(u64)]u8 = undefined;
 
 test Arena {
-    var arena = std.mem.validationWrap(Arena.initBuffer(test_fixed_buffer_allocator_memory[0..]));
+    var arena = std.mem.validationWrap(Arena.initBuffer(test_arena_memory[0..]));
     const a = arena.allocator();
 
     try std.heap.testAllocator(a);
@@ -265,10 +313,10 @@ test reset {
 }
 
 test "reuse memory on realloc" {
-    var small_fixed_buffer: [10]u8 = undefined;
+    var small_buffer: [10]u8 = undefined;
     // check if we re-use the memory
     {
-        var arena = Arena.initBuffer(small_fixed_buffer[0..]);
+        var arena = Arena.initBuffer(small_buffer[0..]);
         const a = arena.allocator();
 
         const slice0 = try a.alloc(u8, 5);
@@ -279,7 +327,7 @@ test "reuse memory on realloc" {
     }
     // check that we don't re-use the memory if it's not the most recent block
     {
-        var arena = Arena.initBuffer(small_fixed_buffer[0..]);
+        var arena = Arena.initBuffer(small_buffer[0..]);
         const a = arena.allocator();
 
         var slice0 = try a.alloc(u8, 2);
