@@ -190,10 +190,11 @@ will not free the memory of the string so it is recommended to use a statically 
 The arena is a simple allocator that allocates memory from a fixed size buffer. It is basically `std.heap.FixedBufferAllocator` 
 but with a few functions that i like to use. More importantly for me it hard crashes if the memory is exhausted rather than throw an error.
 
-It additionally provides an `std.mem.Allocator` interface so you can use it with the rest of the standard library but it has no 
-free, realloc or resize functions for now.
+It additionally provides an `std.mem.Allocator` interface so you can use it with the rest of the standard library.
 
 ```zig
+const std = @import("std");
+const assert = std.debug.assert;
 const stdx = @import("stdx");
 
 pub fn main() !void {
@@ -211,6 +212,13 @@ pub fn main() !void {
     arena.reset(false);
     std.log.info("{d}", .{a.*});
     std.log.info("{d}", .{b.*});
+
+    var array_list: std.ArrayList(u8) = .empty;
+    defer arena.free(arena.allocator());
+
+    array_list.appendSlice(arena.allocator(), "abcd");
+    assert(array_list.items.len == 4);
+    assert(std.mem.eql(u8, array_list.items, "abcd"));
 }
 ```
 
@@ -219,9 +227,10 @@ pub fn main() !void {
 ### PNG
 Full support for decoding PNG files.
 > ⚠️ Though this is mostly complete, there are still tests that need to be written and the parser verified.
->    This is tracked in the [issue](.gila/todo/chubby_koi_gqx/chubby_koi_gqx.md).
+>    This is tracked in the [issue](.gila/todo/bowed_path_6n3/bowed_path_6n3.md).
 
 ```zig
+const std = @import("std");
 const stdx = @import("stdx");
 const png = stdx.png;
 
@@ -236,7 +245,10 @@ pub fn main() !void {
     defer arena.deinit(std.heap.page_allocator);
     // The actual image data is stored in the General Purpose Array List (GPA) allocator and not on the arena.
     // This makes the arena safe to reuse and/or deallocate after the image is parsed.
-    const image = try png.read(file, &arena, std.heap.page_allocator, &diagnostic, .default);
+    const image = png.parseFile(file, &arena, std.heap.page_allocator, &diagnostic, .default) catch |err| {
+        std.log.err("ERROR: PNG parsing failed: {s}", .{diagnostic.?});
+        return err;
+    };
     defer std.heap.page_allocator.free(image.data);
 
     std.log.info("Width: {d}", .{image.width});

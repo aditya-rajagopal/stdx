@@ -1,4 +1,9 @@
 ///! @TODO More tests
+///! @TODO Add support for
+///        * 16bit per channel images
+///        * Paletted images
+///        * Interlaced images
+///        * Parsing form memory
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -26,358 +31,125 @@ pub const Image = struct {
     data: []u8,
 };
 
-pub const PNGError = error{ParseFailed} || std.mem.Allocator.Error || ZlibContext.ZlibError;
+pub const PNGError = error{ParseFailed} || std.mem.Allocator.Error || Zlib.ZlibError;
 
-pub fn read(
+/// Parses a PNG file.
+///
+/// @IMPORTANT This function has the following restrictions:
+/// * 8bit per channel images only
+/// * Non interlaced images
+/// * Non paletted images
+/// * Only parses the IHDR, IDAT and IEND chunks. Skips any other chunks.
+///
+/// Please use https://github.com/nothings/stb/blob/master/stb_image.h for a more complete PNG parser and for writing PNG files.
+///
+/// This is mostly as an exercise and to have a native zig PNG parser. It will become feature complete in the future.
+pub fn parseFile(
     file: std.fs.File,
+    /// Used for allocating intermediate buffers which can safely be discarded after the image has parsed.
+    /// This arena should be large enough to hold the raw png data, the deflated image data and 2 scanlines of the image.
+    /// Recommendation: expected_width * expected_height * num_channels * 4 bytes.
     arena: *stdx.Arena,
+    /// The allocator used for the final image data. This data must be freed by the user.
     gpa: std.mem.Allocator,
+    /// Optional diagnostic string. If not null and stdx_options.detailed_diagnostics_png is true, the parser will add
+    /// extra diagnostic information to the pointer when an error occurs.
     diagnostic: ?*?[]const u8,
+    /// The configuration for the image parser.
     comptime config: ImageLoadConfig,
 ) PNGError!Image {
-    // Control the file reader buffer size.
-    const BufferSize = 4096 * 1;
+    const BufferSize = 4096 * 4;
     comptime {
         assert(BufferSize > 8);
     }
-    const allocator = arena.allocator();
-    var temp_buffer: [BufferSize]u8 = undefined;
-    var file_reader = file.reader(&temp_buffer);
+    var temp_buffer: []u8 = arena.pushArrayAligned(u8, .fromByteUnits(4096), BufferSize);
+    var file_reader = file.reader(temp_buffer);
     const reader = &file_reader.interface;
 
-    const png_magic = reader.takeInt(u64, .little) catch return Error(diagnostic, "Invalid PNG magic number");
-    if (png_magic != PNGHeader) return Error(diagnostic, "PNG magic number mismatch");
+    const info, const compressed = try parseChunks(reader, arena, diagnostic);
 
-    var ctx: PNGContext = undefined;
-    ctx.current_chunk.tag = .null_type;
-    ctx.raw_data = .empty;
+    var deflated = try Zlib.deflate(compressed, arena, info, diagnostic);
 
-    var first_chunk: bool = true;
-    parsing_loop: while (true) {
-        ctx.current_chunk.length = reader.takeInt(u32, .big) catch return Error(diagnostic, "Cound not read next chunk length");
-        ctx.current_chunk.tag = reader.takeEnum(ChunkType, .little) catch return Error(diagnostic, "Cound not read next chunk type");
-
-        switch (ctx.current_chunk.tag) {
-            .IHDR => {
-                if (ctx.current_chunk.length != 13) return Error(diagnostic, "Invalid IHDR length");
-                if (!first_chunk) return Error(diagnostic, "IHDR was not the first chunk");
-
-                first_chunk = false;
-
-                ctx.info.width = reader.takeInt(u32, .big) catch return Error(diagnostic, "Cound not read IHDR width");
-                ctx.info.height = reader.takeInt(u32, .big) catch return Error(diagnostic, "Cound not read IHDR height");
-
-                if (ctx.info.width > MAX_IMAGE_DIM) return Error(diagnostic, "Image width too large");
-                if (ctx.info.height > MAX_IMAGE_DIM) return Error(diagnostic, "Image height too large");
-                if (ctx.info.height == 0) return Error(diagnostic, "Image height is zero");
-                if (ctx.info.width == 0) return Error(diagnostic, "Image width is zero");
-
-                const bit_depth = reader.takeInt(u8, .little) catch return Error(diagnostic, "Cound not read IHDR bit depth");
-                if (bit_depth != 1 and bit_depth != 2 and bit_depth != 4 and bit_depth != 8 and bit_depth != 16) {
-                    return Error(diagnostic, "Invalid bit depth");
-                }
-                ctx.info.bit_depth = bit_depth;
-
-                const colour_type = reader.takeInt(u8, .little) catch return Error(diagnostic, "Cound not read IHDR colour type");
-                if (colour_type > 6) return Error(diagnostic, "Invalid colour type");
-
-                ctx.info.colour_type = @enumFromInt(colour_type);
-                ctx.info.num_channels = ctx.info.colour_type.get_num_channels();
-
-                ctx.info.compression_method = reader.takeInt(u8, .little) catch return Error(diagnostic, "Cound not read IHDR compression method");
-                if (ctx.info.compression_method != 0) return Error(diagnostic, "Invalid compression method");
-                ctx.info.filter_method = reader.takeInt(u8, .little) catch return Error(diagnostic, "Cound not read IHDR filter method");
-                if (ctx.info.filter_method != 0) return Error(diagnostic, "Invalid filter method");
-
-                ctx.info.interlace_method = reader.takeInt(u8, .little) catch return Error(diagnostic, "Cound not read IHDR interlace method");
-                if (ctx.info.interlace_method > 1) return Error(diagnostic, "Invalid interlace method");
-
-                // NOTE: Trying to reserve some reasonable amount based on some example images. This should always be larger?
-                ctx.raw_data = try std.ArrayList(u8).initCapacity(
-                    allocator,
-                    (ctx.info.width + 1) * ctx.info.height * ctx.info.num_channels,
-                );
-
-                if (ctx.info.bit_depth != 8 or // WARN: Only suuport 8bit format
-                    ctx.info.interlace_method != 0 or // WARN: Only non-interlaced images
-                    ctx.info.colour_type == .plte // WARN: Cannot deal wth palletes
-                ) {
-                    return Error(diagnostic, "Unsupported PNG format. Currently only supporting 8bi, non-interlaced, and non-paletted images");
-                }
-            },
-            .IDAT => {
-                if (first_chunk) return Error(diagnostic, "IDAT was the first chunk");
-                try ctx.raw_data.ensureUnusedCapacity(allocator, ctx.current_chunk.length);
-                const current_length = ctx.raw_data.items.len;
-                ctx.raw_data.items.len += ctx.current_chunk.length;
-                const chunk_buffer = ctx.raw_data.items[current_length..][0..ctx.current_chunk.length];
-                reader.readSliceAll(chunk_buffer) catch return Error(diagnostic, "Failed to read IDAT chunk");
-            },
-            .IEND => {
-                if (first_chunk) return Error(diagnostic, "IEND was the first chunk");
-                if (ctx.raw_data.items.len == 0) return Error(diagnostic, "IEND was not preceeded by IDAT");
-                assert(ctx.current_chunk.length == 0);
-                ctx.data = ctx.raw_data.items;
-                break :parsing_loop;
-            },
-            else => {
-                if (first_chunk) return Error(diagnostic, "First chunk was not IHDR");
-                reader.discardAll(ctx.current_chunk.length) catch return Error(diagnostic, "Failed to skip chunk");
-            },
-        }
-        _ = reader.discardAll(4) catch return Error(diagnostic, "Failed to skip CRC");
-    }
-
-    // NOTE: Validate zlib header
-    assert(ctx.data.len >= 2);
-    const compression_mode_flags: u32 = ctx.data[0];
-    const compression_mode: u32 = compression_mode_flags & 15;
-    const flag: u32 = ctx.data[1];
-    if ((compression_mode_flags * 256 + flag) % 31 != 0) return Error(diagnostic, "Invalid zlib header");
-    // NOTE: PNG spec preset directory not allowed
-    if (flag & 32 != 0) return Error(diagnostic, "Preset dictionary not allowed");
-    if (compression_mode != 8) return Error(diagnostic, "Invalid compression mode");
-
-    ctx.data = ctx.data[2..];
-    // NOTE: Zlib spec
-    if (ctx.data.len == 0) return Error(diagnostic, "Invalid zlib header");
-
-    const bytes_per_row = (ctx.info.width * ctx.info.bit_depth + 7) >> 3;
-    // NOTE: The extra row is for the filter mode
-    const size_estimate = bytes_per_row * ctx.info.height * ctx.info.num_channels + ctx.info.height;
-    var uncompressed_data = try std.ArrayList(u8).initCapacity(allocator, size_estimate);
-
-    var z_ctx = ZlibContext{
-        .data = ctx.data,
-        .num_bits = 0,
-        .bit_buffer = 0,
-        .length = undefined,
-        .distance = undefined,
-    };
-
-    var is_final_block: u32 = 0;
-    var length_huffman: HuffmanTree = undefined;
-    var distance_huffman: HuffmanTree = undefined;
-
-    decompression_loop: while (is_final_block == 0) {
-        is_final_block = try z_ctx.consume(1);
-        const block_type: ZlibBlockType = @enumFromInt(try z_ctx.consume(2));
-        switch (block_type) {
-            .uncompressed => {
-                _ = try z_ctx.consume(5);
-                // NOTE: Manually drain out the existing data in the bit buffer.
-                // It is assumed that the num bits is a multiple of 8 else it is a problem.
-                assert(z_ctx.num_bits % 8 == 0);
-                var k: usize = 0;
-                var header: [4]u8 = undefined;
-                while (z_ctx.num_bits > 0) {
-                    header[k] = @truncate(z_ctx.bit_buffer & 255);
-                    k += 1;
-                    z_ctx.bit_buffer >>= 8;
-                    z_ctx.num_bits -= 8;
-                }
-                // NOTE: Fill the rest directly so that we dont touch the data directly
-                while (k < 4) {
-                    header[k] = z_ctx.data[0];
-                    z_ctx.data = z_ctx.data[1..];
-                    k += 1;
-                }
-
-                const data_size: u16 = @as(u16, header[1]) * 256 + header[0];
-                const ndata_size: u16 = @as(u16, header[3]) * 256 + header[2];
-
-                if (ndata_size != data_size ^ 0xFFFF) return Error(diagnostic, "Corrupted Zlib data");
-                if (data_size > z_ctx.data.len) return Error(diagnostic, "Insufficient data");
-
-                try uncompressed_data.appendSlice(allocator, z_ctx.data[0..data_size]);
-                z_ctx.data = z_ctx.data[data_size..];
-                continue :decompression_loop;
-            },
-            .fixed_huffman => {
-                z_ctx.length = &default_length_huffman;
-                z_ctx.distance = &default_distaces_huffman;
-            },
-            .dynamic_huffman => {
-                // TODO: Compute the dynamic huffman
-                const length_swizzle = [_]u8{ 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
-
-                const hlit = try z_ctx.consume(5) + 257;
-                const hdist = try z_ctx.consume(5) + 1;
-                const hclen = try z_ctx.consume(4) + 4;
-
-                // NOTE: We can have codes from 1-18
-                var sizes: [19]u8 = std.mem.zeroes([19]u8);
-
-                for (0..hclen) |i| {
-                    sizes[length_swizzle[i]] = @truncate(try z_ctx.consume(3));
-                }
-
-                var huffman_huffman: HuffmanTree = undefined;
-                huffman_huffman.init(&sizes) catch return Error(diagnostic, "Invalid Huffman tree");
-
-                const total = hlit + hdist;
-                // From stb_image. HLIT can be at most 286 and HDIST can be atmost 32. The last code could be 18
-                // and repeat for 138 times. So pad it out for safety
-                var dynamic_huffman_data: [286 + 32 + 137]u8 = undefined;
-
-                var index: usize = 0;
-                while (index < total) {
-                    var code: u32 = z_ctx.decode(&huffman_huffman);
-                    var fill: u8 = 0;
-                    switch (code) {
-                        0...15 => {
-                            dynamic_huffman_data[index] = @truncate(code);
-                            index += 1;
-                            continue;
-                        },
-                        16 => {
-                            code = try z_ctx.consume(2) + 3;
-                            assert(index != 0);
-                            fill = dynamic_huffman_data[index - 1];
-                        },
-                        17 => code = try z_ctx.consume(3) + 3,
-                        18 => code = try z_ctx.consume(7) + 11,
-                        else => return Error(diagnostic, "Invalid Huffman tree code"),
-                    }
-                    if (index + code > total) return Error(diagnostic, "Invalid Huffman tree code");
-                    @memset(dynamic_huffman_data[index .. index + code], fill);
-                    index += code;
-                }
-                length_huffman.init(dynamic_huffman_data[0..hlit]) catch return Error(diagnostic, "Invalid Length Huffman tree");
-                distance_huffman.init(dynamic_huffman_data[hlit .. hlit + hdist]) catch return Error(diagnostic, "Invalid Distance Huffman tree");
-
-                z_ctx.length = &length_huffman;
-                z_ctx.distance = &distance_huffman;
-            },
-            .invalid_reserved => return Error(diagnostic, "Invalid Zlib block type"),
-        }
-
-        {
-            // NOTE: Parse huffman block
-            while (true) {
-                var code: u32 = z_ctx.decode_length();
-                switch (code) {
-                    0...255 => {
-                        try uncompressed_data.append(allocator, @truncate(code));
-                    },
-                    256 => {
-                        // TODO: Check for malformed data that reads more than end of raw data
-                        break;
-                    },
-                    257...285 => {
-                        code = code - 257;
-                        var length = length_base[code];
-                        if (length_extra[code] != 0) {
-                            length += try z_ctx.consume(@truncate(length_extra[code]));
-                        }
-
-                        code = z_ctx.decode_dist();
-                        assert(code < 30);
-                        var dist = dist_base[code];
-                        if (dist_extra[code] != 0) {
-                            dist += try z_ctx.consume(@truncate(dist_extra[code]));
-                        }
-
-                        if (uncompressed_data.items.len < dist) return Error(diagnostic, "Invalid Zlib data distance longer than data");
-
-                        if (length != 0) {
-                            if (dist == 1) {
-                                try uncompressed_data.appendNTimes(allocator, uncompressed_data.items[uncompressed_data.items.len - 1], length);
-                            } else {
-                                const start = uncompressed_data.items.len;
-                                const read_start = uncompressed_data.items.len - dist;
-                                try uncompressed_data.resize(allocator, uncompressed_data.items.len + length);
-                                // for (0..length) |i| {
-                                //     uncompressed_data.items[start + i] = uncompressed_data.items[read_start + i];
-                                // }
-                                std.mem.copyForwards(
-                                    u8,
-                                    uncompressed_data.items[start..],
-                                    uncompressed_data.items[read_start .. read_start + length],
-                                );
-                            }
-                        }
-                    },
-                    else => return Error(diagnostic, "Invalid Zlib data length"),
-                }
-            }
-        }
-    }
-
-    var num_channles = ctx.info.num_channels;
-    if (config.requested_channels == ctx.info.num_channels + 1 and config.requested_channels != 3) {
+    var num_channles = info.num_channels;
+    if (config.requested_channels == info.num_channels + 1 and config.requested_channels != 3) {
         num_channles += 1;
     }
+    const raw_channels = info.num_channels;
 
     // WARN: Only supporting 8 bits per channel
-    const width_stride, var overflow = @mulWithOverflow(ctx.info.width, num_channles);
+    const width_stride, var overflow = @mulWithOverflow(info.width, num_channles);
     var img_len: u32 = 0;
     if (overflow == 0) {
-        img_len, overflow = @mulWithOverflow(width_stride, ctx.info.height);
+        img_len, overflow = @mulWithOverflow(width_stride, info.height);
         if (overflow != 0) return Error(diagnostic, "Image too large");
     } else {
         return Error(diagnostic, "Image too large");
     }
-    const width_bytes, overflow = @mulWithOverflow(ctx.info.width, ctx.info.num_channels);
+
+    const width_bytes, overflow = @mulWithOverflow(info.width, raw_channels);
     if (overflow != 0) return Error(diagnostic, "Image too large");
 
-    if (uncompressed_data.items.len < width_bytes * ctx.info.height) return Error(diagnostic, "Uncompressed data too small");
+    if (deflated.len < width_bytes * info.height) return Error(diagnostic, "Uncompressed data too small");
 
     const out_data = try gpa.alloc(u8, img_len);
     errdefer gpa.free(out_data);
 
     // NOTE: We crete 2 buffers for scanlines. But this one will use the channels of the read image
-    const filter_buffer = try allocator.alloc(u8, width_bytes * 2);
-    const raw_channels = ctx.info.num_channels;
+    // NOTE: More often than not the compressed data is going to be larger than 2 scanlines and we dont need
+    // it after deflating so we can reuse the memory allowing the arena to be a bit smaller.
+    // PERF: This is a very minor optimzation. Maybe this is not worth it.
+    const filter_buffer = if (compressed.len > width_bytes * 2) blk: {
+        @branchHint(.likely);
+        break :blk compressed[0 .. width_bytes * 2];
+    } else blk: {
+        break :blk arena.pushArray(u8, width_bytes * 2);
+    };
+    @memset(filter_buffer, 0);
 
-    {
-        // INFO: Unfilter the uncompressed data
+    { // INFO: Unfilter the uncompressed data
         const front_back_buffer = [_][]u8{ filter_buffer[0..width_bytes], filter_buffer[width_bytes..] };
-
-        var unfiltered = uncompressed_data.items;
 
         const first_filter_map = [5]FilterTypes{ .none, .sub, .none, .average, .sub };
 
-        for (0..ctx.info.height) |i| {
+        for (0..info.height) |i| {
             const dest_buffer = out_data[width_stride * i .. width_stride * (i + 1)];
             const current_buffer = front_back_buffer[i & 1];
             const previous_buffer = front_back_buffer[~i & 1];
 
             // INFO: from stb_image: for the first scanline it is useful to redeine the filter type based on what the
             // filtering alogrithm transforms into assuming the previous scanline is all 0s
-            const filter_type: FilterTypes = if (i == 0) first_filter_map[unfiltered[0]] else @enumFromInt(unfiltered[0]);
-            unfiltered = unfiltered[1..];
+            const filter_type: FilterTypes = if (i == 0) first_filter_map[deflated[0]] else @enumFromInt(deflated[0]);
+            deflated = deflated[1..];
 
             switch (filter_type) {
                 .none => {
-                    @memcpy(current_buffer, unfiltered[0..width_bytes]);
+                    @memcpy(current_buffer, deflated[0..width_bytes]);
                 },
                 .sub => {
-                    @memcpy(current_buffer[0..raw_channels], unfiltered[0..raw_channels]);
+                    @memcpy(current_buffer[0..raw_channels], deflated[0..raw_channels]);
                     for (raw_channels..width_bytes) |pixel| {
                         current_buffer[pixel] = @truncate(
-                            @as(u64, unfiltered[pixel]) + current_buffer[pixel - raw_channels],
+                            @as(u64, deflated[pixel]) + current_buffer[pixel - raw_channels],
                         );
                     }
                 },
                 .up => {
                     for (0..width_bytes) |pixel| {
                         current_buffer[pixel] = @truncate(
-                            @as(u64, unfiltered[pixel]) + previous_buffer[pixel],
+                            @as(u64, deflated[pixel]) + previous_buffer[pixel],
                         );
                     }
                 },
                 .average => {
                     for (0..raw_channels) |channel| {
-                        // Previous in current buffer is 0
                         current_buffer[channel] = @truncate(
-                            (@as(u64, unfiltered[channel]) + (previous_buffer[channel] >> 1)) & 255,
+                            (@as(u64, deflated[channel]) + (previous_buffer[channel] >> 1)) & 255,
                         );
                     }
 
                     for (raw_channels..width_bytes) |pixel| {
                         current_buffer[pixel] = @truncate(
-                            @as(u64, unfiltered[pixel]) +
+                            @as(u64, deflated[pixel]) +
                                 ((@as(u64, previous_buffer[pixel]) + current_buffer[pixel - raw_channels]) >> 1),
                         );
                     }
@@ -385,7 +157,7 @@ pub fn read(
                 .paeth => {
                     for (0..raw_channels) |channel| {
                         current_buffer[channel] = @truncate(
-                            (@as(u64, unfiltered[channel]) + previous_buffer[channel]),
+                            (@as(u64, deflated[channel]) + previous_buffer[channel]),
                         );
                     }
                     for (raw_channels..width_bytes) |pixel| {
@@ -394,7 +166,7 @@ pub fn read(
                                 @as(
                                     i8,
                                     @truncate(
-                                        @as(i32, unfiltered[pixel]) +
+                                        @as(i32, deflated[pixel]) +
                                             stbi__paeth(
                                                 current_buffer[pixel - raw_channels],
                                                 previous_buffer[pixel],
@@ -406,29 +178,29 @@ pub fn read(
                     }
                 },
                 .average_first => {
-                    @memcpy(current_buffer[0..raw_channels], unfiltered[0..raw_channels]);
+                    @memcpy(current_buffer[0..raw_channels], deflated[0..raw_channels]);
                     for (raw_channels..width_bytes) |pixel| {
                         current_buffer[pixel] = @truncate(
-                            @as(u32, unfiltered[pixel]) + (current_buffer[pixel - raw_channels] >> 1),
+                            @as(u32, deflated[pixel]) + (current_buffer[pixel - raw_channels] >> 1),
                         );
                     }
                 },
             }
-            unfiltered = unfiltered[width_bytes..];
+            deflated = deflated[width_bytes..];
 
-            // WARN: Again this only accepts 8bit per channel images so we dont need any other checks
+            // WARN: Again this parser only accepts 8bit per channel images so we dont need any other checks
             if (raw_channels == num_channles) {
                 @memcpy(dest_buffer, current_buffer);
             } else {
                 // NOTE: add 255 to the alhpa channel
                 if (raw_channels == 1) {
-                    for (0..ctx.info.width) |col| {
+                    for (0..info.width) |col| {
                         dest_buffer[col * 2 + 0] = current_buffer[col];
                         dest_buffer[col * 2 + 1] = 255;
                     }
                 } else {
                     assert(raw_channels == 3);
-                    for (0..ctx.info.width) |col| {
+                    for (0..info.width) |col| {
                         dest_buffer[col * 4 + 0] = current_buffer[col * 3 + 0];
                         dest_buffer[col * 4 + 1] = current_buffer[col * 3 + 1];
                         dest_buffer[col * 4 + 2] = current_buffer[col * 3 + 2];
@@ -440,9 +212,9 @@ pub fn read(
     }
 
     if (comptime config.flip_vertical_on_load) {
-        for (0..ctx.info.height >> 1) |row| {
+        for (0..info.height >> 1) |row| {
             var row0 = out_data[row * width_stride ..];
-            var row1 = out_data[(ctx.info.height - row - 1) * width_stride ..];
+            var row1 = out_data[(info.height - row - 1) * width_stride ..];
 
             var bytes_to_write = width_stride;
             while (bytes_to_write > 0) {
@@ -460,8 +232,8 @@ pub fn read(
     return Image{
         .forced_transparency = raw_channels != num_channles,
         .data = out_data,
-        .height = ctx.info.height,
-        .width = ctx.info.width,
+        .height = info.height,
+        .width = info.width,
         .channels = num_channles,
     };
 }
@@ -472,7 +244,7 @@ test "readPNG" {
     var diagnostic: ?[]const u8 = null;
     var arena = try stdx.Arena.init(std.testing.allocator, 16 * 1024 * 1024, null);
     defer arena.deinit(std.testing.allocator);
-    const image = read(file, &arena, std.testing.allocator, &diagnostic, .default) catch {
+    const image = parseFile(file, &arena, std.testing.allocator, &diagnostic, .default) catch {
         std.debug.print("Error: {s}\n", .{diagnostic.?});
         return error.ParseFailed;
     };
@@ -563,15 +335,97 @@ const ChunkType = enum(u32) {
     _,
 };
 
-const PNGContext = struct {
-    info: PNGInfo,
-    current_chunk: struct {
-        length: u32,
-        tag: ChunkType,
-    },
-    data: []const u8,
-    raw_data: std.ArrayList(u8),
-};
+fn parseChunks(reader: *std.Io.Reader, arena: *stdx.Arena, diagnostic: ?*?[]const u8) PNGError!struct { PNGInfo, []u8 } {
+    const png_magic = reader.takeInt(u64, .little) catch return Error(diagnostic, "Invalid PNG magic number");
+    if (png_magic != PNGHeader) return Error(diagnostic, "PNG magic number mismatch");
+
+    var current_chunk_length: u32 = 0;
+    var current_chunk_tag: ChunkType = .null_type;
+    var raw_data: std.ArrayList(u8) = .empty;
+    var info: PNGInfo = undefined;
+
+    var first_chunk: bool = true;
+    while (true) {
+        current_chunk_length = reader.takeInt(u32, .big) catch return Error(diagnostic, "Cound not read next chunk length");
+        current_chunk_tag = reader.takeEnum(ChunkType, .little) catch return Error(diagnostic, "Cound not read next chunk type");
+
+        switch (current_chunk_tag) {
+            .IHDR => {
+                if (current_chunk_length != 13) return Error(diagnostic, "Invalid IHDR length");
+                if (!first_chunk) return Error(diagnostic, "IHDR was not the first chunk");
+
+                first_chunk = false;
+
+                info.width = reader.takeInt(u32, .big) catch return Error(diagnostic, "Cound not read IHDR width");
+                info.height = reader.takeInt(u32, .big) catch return Error(diagnostic, "Cound not read IHDR height");
+
+                if (info.width > MAX_IMAGE_DIM) return Error(diagnostic, "Image width too large");
+                if (info.height > MAX_IMAGE_DIM) return Error(diagnostic, "Image height too large");
+                if (info.height == 0) return Error(diagnostic, "Image height is zero");
+                if (info.width == 0) return Error(diagnostic, "Image width is zero");
+
+                const bit_depth = reader.takeInt(u8, .little) catch return Error(diagnostic, "Cound not read IHDR bit depth");
+                if (bit_depth != 1 and bit_depth != 2 and bit_depth != 4 and bit_depth != 8 and bit_depth != 16) {
+                    return Error(diagnostic, "Invalid bit depth");
+                }
+                info.bit_depth = bit_depth;
+
+                const colour_type = reader.takeInt(u8, .little) catch return Error(diagnostic, "Cound not read IHDR colour type");
+                if (colour_type > 6) return Error(diagnostic, "Invalid colour type");
+
+                info.colour_type = @enumFromInt(colour_type);
+                if (info.colour_type == .plte) return Error(diagnostic, "TODO: Paletted images are not supported");
+                info.num_channels = info.colour_type.get_num_channels();
+
+                info.compression_method = reader.takeInt(u8, .little) catch return Error(diagnostic, "Cound not read IHDR compression method");
+                if (info.compression_method != 0) return Error(diagnostic, "Invalid compression method");
+                info.filter_method = reader.takeInt(u8, .little) catch return Error(diagnostic, "Cound not read IHDR filter method");
+                if (info.filter_method != 0) return Error(diagnostic, "Invalid filter method");
+
+                info.interlace_method = reader.takeInt(u8, .little) catch return Error(diagnostic, "Cound not read IHDR interlace method");
+                if (info.interlace_method > 1) return Error(diagnostic, "Invalid interlace method found");
+                if (info.interlace_method == 1) return Error(diagnostic, "Adam7 interlaced images are not supported");
+
+                // NOTE: Trying to reserve some reasonable amount based on some example images. This should always be larger?
+                // NOTE(adi): This is safe because we are using an arena that would have failed to allocate and crashed
+                // if we ran out of memory
+                raw_data = std.ArrayList(u8).initCapacity(
+                    arena.allocator(),
+                    (info.width + 1) * info.height * info.num_channels,
+                ) catch unreachable;
+
+                if (info.bit_depth != 8 or // WARN: Only suuport 8bit format
+                    info.interlace_method != 0 or // WARN: Only non-interlaced images
+                    info.colour_type == .plte // WARN: Cannot deal wth palletes
+                ) {
+                    return Error(diagnostic, "Unsupported PNG format. Currently only supporting 8bi, non-interlaced, and non-paletted images");
+                }
+            },
+            .IDAT => {
+                if (first_chunk) return Error(diagnostic, "IDAT was the first chunk");
+                // NOTE(adi): This is safe because we are using an arena that would have failed to allocate and crashed
+                // if we ran out of memory
+                raw_data.ensureUnusedCapacity(arena.allocator(), current_chunk_length) catch unreachable;
+                const current_length = raw_data.items.len;
+                raw_data.items.len += current_chunk_length;
+                const chunk_buffer = raw_data.items[current_length..][0..current_chunk_length];
+                reader.readSliceAll(chunk_buffer) catch return Error(diagnostic, "Failed to read IDAT chunk");
+            },
+            .IEND => {
+                if (first_chunk) return Error(diagnostic, "IEND was the first chunk");
+                if (raw_data.items.len == 0) return Error(diagnostic, "IEND was not preceeded by IDAT");
+                assert(current_chunk_length == 0);
+                break;
+            },
+            else => {
+                if (first_chunk) return Error(diagnostic, "First chunk was not IHDR");
+                reader.discardAll(current_chunk_length) catch return Error(diagnostic, "Failed to skip chunk");
+            },
+        }
+        _ = reader.discardAll(4) catch return Error(diagnostic, "Failed to skip CRC");
+    }
+    return .{ info, raw_data.items };
+}
 
 // The standard PNG header that all PNG files should have
 const PNGHeader: u64 = @bitCast([_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A });
@@ -732,7 +586,7 @@ const HuffmanTree = struct {
     }
 };
 
-const ZlibContext = struct {
+const Zlib = struct {
     done: bool = false,
     data: []const u8,
     num_bits: u8 = 0,
@@ -742,7 +596,190 @@ const ZlibContext = struct {
 
     pub const ZlibError = error{InsufficientZlibData};
 
-    pub fn fill_buffer(self: *ZlibContext) void {
+    pub fn deflate(compressed: []const u8, arena: *stdx.Arena, info: PNGInfo, diagnostic: ?*?[]const u8) PNGError![]const u8 {
+        var ctx = Zlib{
+            .data = compressed,
+            .num_bits = 0,
+            .bit_buffer = 0,
+            .length = undefined,
+            .distance = undefined,
+        };
+
+        // NOTE: Validate zlib header
+        // NOTE: Zlib spec
+        if (ctx.data.len <= 2) return Error(diagnostic, "Invalid zlib header");
+        const compression_mode_flags: u32 = ctx.data[0];
+        const compression_mode: u32 = compression_mode_flags & 15;
+        const flag: u32 = ctx.data[1];
+        if ((compression_mode_flags * 256 + flag) % 31 != 0) return Error(diagnostic, "Invalid zlib header");
+
+        // NOTE: PNG spec preset directory not allowed
+        if (flag & 32 != 0) return Error(diagnostic, "Preset dictionary not allowed");
+        if (compression_mode != 8) return Error(diagnostic, "Invalid compression mode");
+        ctx.data = ctx.data[2..];
+
+        var is_final_block: u32 = 0;
+        var length_huffman: HuffmanTree = undefined;
+        var distance_huffman: HuffmanTree = undefined;
+        const bytes_per_row = (info.width * info.bit_depth + 7) >> 3;
+        // NOTE: The first byte of every column is the filter type hence the + info.height
+        const size_estimate = bytes_per_row * info.height * info.num_channels + info.height;
+        const deflated_buffer = arena.pushArray(u8, size_estimate);
+        var deflated = std.ArrayList(u8).initBuffer(deflated_buffer);
+
+        decompression_loop: while (is_final_block == 0) {
+            is_final_block = try ctx.consume(1);
+            const block_type: ZlibBlockType = @enumFromInt(try ctx.consume(2));
+            switch (block_type) {
+                .uncompressed => {
+                    _ = try ctx.consume(5);
+                    // NOTE: Manually drain out the existing data in the bit buffer.
+                    // It is assumed that the num bits is a multiple of 8 else it is a problem.
+                    assert(ctx.num_bits % 8 == 0);
+                    var k: usize = 0;
+                    var header: [4]u8 = undefined;
+                    while (ctx.num_bits > 0) {
+                        header[k] = @truncate(ctx.bit_buffer & 255);
+                        k += 1;
+                        ctx.bit_buffer >>= 8;
+                        ctx.num_bits -= 8;
+                    }
+                    // NOTE: Fill the rest directly so that we dont touch the data directly
+                    while (k < 4) {
+                        header[k] = ctx.data[0];
+                        ctx.data = ctx.data[1..];
+                        k += 1;
+                    }
+
+                    const data_size: u16 = @as(u16, header[1]) * 256 + header[0];
+                    const ndata_size: u16 = @as(u16, header[3]) * 256 + header[2];
+
+                    if (ndata_size != data_size ^ 0xFFFF) return Error(diagnostic, "Corrupted Zlib data");
+                    if (data_size > ctx.data.len) return Error(diagnostic, "Insufficient data");
+
+                    // NOTE: We should have enough space in the buffer. Hence we assert it
+                    assert(deflated.items.len + data_size <= deflated.capacity);
+                    deflated.appendSliceAssumeCapacity(ctx.data[0..data_size]);
+                    ctx.data = ctx.data[data_size..];
+                    continue :decompression_loop;
+                },
+                .fixed_huffman => {
+                    ctx.length = &default_length_huffman;
+                    ctx.distance = &default_distaces_huffman;
+                },
+                .dynamic_huffman => {
+                    // TODO: Compute the dynamic huffman
+                    const length_swizzle = [_]u8{ 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
+
+                    const hlit = try ctx.consume(5) + 257;
+                    const hdist = try ctx.consume(5) + 1;
+                    const hclen = try ctx.consume(4) + 4;
+
+                    // NOTE: We can have codes from 1-18
+                    var sizes: [19]u8 = std.mem.zeroes([19]u8);
+
+                    for (0..hclen) |i| {
+                        sizes[length_swizzle[i]] = @truncate(try ctx.consume(3));
+                    }
+
+                    var huffman_huffman: HuffmanTree = undefined;
+                    huffman_huffman.init(&sizes) catch return Error(diagnostic, "Invalid Huffman tree");
+
+                    const total = hlit + hdist;
+                    // From stb_image. HLIT can be at most 286 and HDIST can be atmost 32. The last code could be 18
+                    // and repeat for 138 times. So pad it out for safety
+                    var dynamic_huffman_data: [286 + 32 + 137]u8 = undefined;
+
+                    var index: usize = 0;
+                    while (index < total) {
+                        var code: u32 = ctx.decode(&huffman_huffman);
+                        var fill: u8 = 0;
+                        switch (code) {
+                            0...15 => {
+                                dynamic_huffman_data[index] = @truncate(code);
+                                index += 1;
+                                continue;
+                            },
+                            16 => {
+                                code = try ctx.consume(2) + 3;
+                                assert(index != 0);
+                                fill = dynamic_huffman_data[index - 1];
+                            },
+                            17 => code = try ctx.consume(3) + 3,
+                            18 => code = try ctx.consume(7) + 11,
+                            else => return Error(diagnostic, "Invalid Huffman tree code"),
+                        }
+                        if (index + code > total) return Error(diagnostic, "Invalid Huffman tree code");
+                        @memset(dynamic_huffman_data[index .. index + code], fill);
+                        index += code;
+                    }
+                    length_huffman.init(dynamic_huffman_data[0..hlit]) catch return Error(diagnostic, "Invalid Length Huffman tree");
+                    distance_huffman.init(dynamic_huffman_data[hlit .. hlit + hdist]) catch return Error(diagnostic, "Invalid Distance Huffman tree");
+
+                    ctx.length = &length_huffman;
+                    ctx.distance = &distance_huffman;
+                },
+                .invalid_reserved => return Error(diagnostic, "Invalid Zlib block type"),
+            }
+
+            { // NOTE: Parse huffman block
+                while (true) {
+                    var code: u32 = ctx.decode_length();
+                    switch (code) {
+                        0...255 => {
+                            assert(deflated.items.len + 1 <= deflated.capacity);
+                            deflated.appendAssumeCapacity(@truncate(code));
+                        },
+                        256 => {
+                            // TODO: Check for malformed data that reads more than end of raw data
+                            break;
+                        },
+                        257...285 => {
+                            code = code - 257;
+                            var length = length_base[code];
+                            if (length_extra[code] != 0) {
+                                length += try ctx.consume(@truncate(length_extra[code]));
+                            }
+
+                            code = ctx.decode_dist();
+                            assert(code < 30);
+                            var dist = dist_base[code];
+                            if (dist_extra[code] != 0) {
+                                dist += try ctx.consume(@truncate(dist_extra[code]));
+                            }
+
+                            if (deflated.items.len < dist) return Error(diagnostic, "Invalid Zlib data distance longer than data");
+
+                            if (length != 0) {
+                                if (dist == 1) {
+                                    assert(deflated.items.len + length <= deflated.capacity);
+                                    deflated.appendNTimesAssumeCapacity(deflated.items[deflated.items.len - 1], length);
+                                } else {
+                                    const start = deflated.items.len;
+                                    const read_start = deflated.items.len - dist;
+                                    // NOTE: We should always have enough space to append
+                                    assert(deflated.items.len + length <= deflated.capacity);
+                                    deflated.items.len += length;
+                                    // for (0..length) |i| {
+                                    //     uncompressed_data.items[start + i] = uncompressed_data.items[read_start + i];
+                                    // }
+                                    std.mem.copyForwards(
+                                        u8,
+                                        deflated.items[start..],
+                                        deflated.items[read_start .. read_start + length],
+                                    );
+                                }
+                            }
+                        },
+                        else => return Error(diagnostic, "Invalid Zlib data length"),
+                    }
+                }
+            }
+        }
+        return deflated.items;
+    }
+
+    fn fill_buffer(self: *Zlib) void {
         while (self.num_bits <= 24) {
             if (self.data.len == 0) {
                 self.done = true;
@@ -754,7 +791,7 @@ const ZlibContext = struct {
         }
     }
 
-    pub fn consume(self: *ZlibContext, num_bits: u5) ZlibError!u32 {
+    fn consume(self: *Zlib, num_bits: u5) ZlibError!u32 {
         var result: u32 = undefined;
         while (self.num_bits < num_bits and self.data.len != 0) {
             self.bit_buffer |= @as(u32, @intCast(self.data[0])) << @truncate(self.num_bits);
@@ -771,15 +808,15 @@ const ZlibContext = struct {
         return result;
     }
 
-    pub inline fn decode_length(self: *ZlibContext) u16 {
+    inline fn decode_length(self: *Zlib) u16 {
         return self.decode(self.length);
     }
 
-    pub inline fn decode_dist(self: *ZlibContext) u16 {
+    inline fn decode_dist(self: *Zlib) u16 {
         return self.decode(self.distance);
     }
 
-    pub fn decode(self: *ZlibContext, huffman: *const HuffmanTree) u16 {
+    fn decode(self: *Zlib, huffman: *const HuffmanTree) u16 {
         // 1. Fill in the bit buffer.
         if (self.num_bits < 16) {
             self.fill_buffer();

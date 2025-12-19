@@ -1,5 +1,4 @@
 const std = @import("std");
-const assert = std.debug.assert;
 
 pub const wav = @import("wav.zig");
 pub const ogg_vorbis = @import("ogg_vorbis.zig");
@@ -12,7 +11,10 @@ pub const Arena = @import("arena.zig");
 pub const BitStream = @import("bitstream.zig");
 pub const png = @import("png.zig");
 
-pub const std_options: std.Options = .{};
+const root = @import("root");
+
+/// Stdlib-wide options that can be overridden by the root file.
+pub const options: Options = if (@hasDecl(root, "stdx_options")) root.stdx_options else .default;
 
 pub const Options = struct {
     /// Internally this function is used when a fatal error occurs and the program should exit.
@@ -25,9 +27,6 @@ pub const Options = struct {
         .detailed_diagnostics_png = true,
     };
 };
-
-const root = @import("root");
-pub const options: Options = if (@hasDecl(root, "stdx_options")) root.stdx_options else .default;
 
 pub fn logFatal(comptime format: []const u8, args: anytype) noreturn {
     var stderr = std.fs.File.stderr().writer(&.{});
