@@ -11,6 +11,16 @@ pub const DateTimeUTC = packed struct(u64) {
     second: u6,
     millisecond: u10,
 
+    pub const default = DateTimeUTC{
+        .year = 1970,
+        .month = 1,
+        .day = 1,
+        .hour = 0,
+        .minute = 0,
+        .second = 0,
+        .millisecond = 0,
+    };
+
     pub const Format = enum {
         YYYYMMDD_HHMMSS,
         @"YYYYMMDD_HHMMSS.fffZ",
