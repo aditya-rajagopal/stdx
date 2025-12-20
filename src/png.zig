@@ -253,8 +253,8 @@ pub fn parse(
         }
     }
 
-    const temp_buffer = arena.pushPages(1);
     if (comptime config.flip_vertical_on_load) {
+        const temp_buffer = arena.pushPages(1);
         for (0..info.height >> 1) |row| {
             var row0 = out_data[row * width_stride ..];
             var row1 = out_data[(info.height - row - 1) * width_stride ..];
