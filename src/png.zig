@@ -41,6 +41,7 @@ pub const PNGError = error{ParseFailed} || std.mem.Allocator.Error || Zlib.ZlibE
 /// This is mostly as an exercise and to have a native zig PNG parser. It will become feature complete in the future.
 pub fn fromFile(
     file: std.fs.File,
+    io: std.Io,
     /// Used for allocating intermediate buffers which can safely be discarded after the image has parsed.
     /// This arena should be large enough to hold the raw png data, the deflated image data and 2 scanlines of the image.
     /// Recommendation: expected_width * expected_height * num_channels * 4 bytes.
@@ -58,7 +59,7 @@ pub fn fromFile(
         assert(BufferSize > 4096);
     }
     const temp_buffer: []u8 = arena.pushArrayAligned(u8, .fromByteUnits(4096), BufferSize);
-    var file_reader = file.reader(temp_buffer);
+    var file_reader = file.reader(io, temp_buffer);
     const reader = &file_reader.interface;
     return parse(reader, arena, gpa, diagnostic, config);
 }
@@ -287,7 +288,8 @@ test "readPNG" {
     var diagnostic: ?[]const u8 = null;
     var arena = try stdx.Arena.init(std.testing.allocator, 16 * 1024 * 1024, null);
     defer arena.deinit(std.testing.allocator);
-    const image = fromFile(file, &arena, std.testing.allocator, &diagnostic, .default) catch {
+    const io = std.testing.io;
+    const image = fromFile(file, io, &arena, std.testing.allocator, &diagnostic, .default) catch {
         std.debug.print("Error: {s}\n", .{diagnostic.?});
         return error.ParseFailed;
     };

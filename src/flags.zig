@@ -221,19 +221,18 @@ fn parseFlags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
     // that did not recieve an argument to their default values and also catch multiple entries for the same flag.
     var counts = comptime blk: {
         var count_fields = std.meta.fields(Flags)[0..std.meta.fields(Flags).len].*;
-        for (&count_fields) |*field| {
-            field.type = u32;
-            field.alignment = @alignOf(u32);
-            field.default_value_ptr = @ptrCast(&@as(u32, 0));
+        var names: [count_fields.len][]const u8 = undefined;
+        var types: [count_fields.len]type = undefined;
+        var attributes: [count_fields.len]Type.StructField.Attributes = undefined;
+        for (&count_fields, 0..) |*field, i| {
+            names[i] = field.name;
+            types[i] = u32;
+            attributes[i] = .{
+                .@"align" = @alignOf(u32),
+                .default_value_ptr = @ptrCast(&@as(u32, 0)),
+            };
         }
-        break :blk @Type(.{
-            .@"struct" = .{
-                .layout = .auto,
-                .fields = &count_fields,
-                .decls = &.{},
-                .is_tuple = false,
-            },
-        }){};
+        break :blk @Struct(.auto, null, names[0..], &types, &attributes){};
     };
 
     const flag_names = comptime blk: {
