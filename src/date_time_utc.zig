@@ -23,13 +23,13 @@ fn milliTimestamp() i64 {
 /// The return value is signed because it is possible to have a date that is
 /// before the epoch.
 /// See `posix.clock_gettime` for a POSIX timestamp.
-fn nanoTimestamp() i128 {
+fn nanoTimestamp() i96 {
     switch (builtin.os.tag) {
         .windows => {
             // RtlGetSystemTimePrecise() has a granularity of 100 nanoseconds and uses the NTFS/Windows epoch,
             // which is 1601-01-01.
-            const epoch_adj = epoch.windows * (ns_per_s / 100);
-            return @as(i128, windows.ntdll.RtlGetSystemTimePrecise() + epoch_adj) * 100;
+            const epoch_adj = epoch.windows * ns_per_s;
+            return @as(i96, windows.ntdll.RtlGetSystemTimePrecise() * 100 + epoch_adj);
         },
         .wasi => {
             var ns: std.os.wasi.timestamp_t = undefined;
@@ -45,7 +45,7 @@ fn nanoTimestamp() i128 {
             const ts = posix.clock_gettime(.REALTIME) catch |err| switch (err) {
                 error.UnsupportedClock, error.Unexpected => return 0, // "Precision of timing depends on hardware and OS".
             };
-            return (@as(i128, ts.sec) * ns_per_s) + ts.nsec;
+            return (@as(i96, ts.sec) * ns_per_s) + ts.nsec;
         },
     }
 }

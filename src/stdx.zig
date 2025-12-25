@@ -34,6 +34,18 @@ pub fn logFatal(comptime format: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 
+pub fn KB(kb: f32) usize {
+    return @intFromFloat(kb * 1024);
+}
+
+pub fn MB(mb: f32) usize {
+    return @intFromFloat(mb * 1024 * 1024);
+}
+
+pub fn GB(gb: f32) usize {
+    return @intFromFloat(gb * 1024 * 1024 * 1024);
+}
+
 test {
     std.testing.refAllDecls(@This());
 }
