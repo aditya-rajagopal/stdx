@@ -10,7 +10,6 @@ pub const DateTimeUTC = date_time.DateTimeUTC;
 pub const Arena = @import("arena.zig");
 pub const BitStream = @import("bitstream.zig");
 pub const png = @import("png.zig");
-pub const math = @import("math.zig");
 
 const root = @import("root");
 
