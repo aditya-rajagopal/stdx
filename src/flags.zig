@@ -388,7 +388,7 @@ fn parseCommand(io: std.Io, args: *std.process.ArgIterator, comptime Command: ty
     // It ***MUST*** be a marked pub to be visable to print.
     if (@hasDecl(Command, "help")) {
         if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
-            var stdout = std.fs.File.stdout().writer(&.{});
+            var stdout = std.Io.File.stdout().writer(io, &.{});
             const interface = &stdout.interface;
             interface.writeAll(Command.help) catch std.process.exit(1);
             std.process.exit(0);
@@ -400,7 +400,7 @@ fn parseCommand(io: std.Io, args: *std.process.ArgIterator, comptime Command: ty
             return @unionInit(
                 Command,
                 field.name,
-                parseFlags(args, field.type),
+                parseFlags(io, args, field.type),
             );
         }
     }
@@ -659,4 +659,29 @@ fn defaultValue(comptime field: std.builtin.Type.StructField) ?field.type {
         @as(*const field.type, @ptrCast(@alignCast(default_opaque))).*
     else
         null;
+}
+
+test {
+    const Args = struct {
+        init: bool = false,
+        positional: struct {
+            directory: ?[]const u8 = null,
+        },
+        pub const help =
+            \\Usage: program init [--bare] [--integer=<integer>] [--enum=<foo|bar>] <directory>
+            \\
+            \\Description
+            \\
+            \\Options:
+            \\  --bare  Creates a bare project without subfolders and tracking files.
+            \\  --integer  An integer flag
+            \\  --enum  An enum flag
+            \\  <directory>  The directory to initialize the project in. Defaults to the current directory.
+            \\
+        ;
+    };
+    var args = std.process.ArgIterator.init();
+    defer args.deinit();
+
+    _ = parseArgs(std.testing.io, std.testing.allocator, &args, Args);
 }
