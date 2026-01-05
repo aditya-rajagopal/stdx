@@ -157,6 +157,7 @@ var local_gpa: std.mem.Allocator = undefined;
 /// 3. If parsed value is returned the error_out paramater must remain null.
 /// 4. If the parseFlagValue function allocates memory it is up to the user to handle the lifetime of the memory.
 pub fn parseArgs(
+    io: std.Io,
     /// Allocator used to forward to the parseFlagValue function of the custom types in case they need to allocate memory for their own needs.
     /// The user is responsible for managing the lifetime of the memory allocated by the parseFlagValue function.
     gpa: std.mem.Allocator,
@@ -169,10 +170,10 @@ pub fn parseArgs(
     // @NOTE This is the only entry point into parsing the arguments so local_gpa will always be set before
     // any calls to custom parseFlagValue functions.
     local_gpa = gpa;
-    return parseFlags(args, ArgType);
+    return parseFlags(io, args, ArgType);
 }
 
-fn parseFlags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
+fn parseFlags(io: std.Io, args: *std.process.ArgIterator, comptime Flags: type) Flags {
     @setEvalBranchQuota(5_000);
     if (Flags == void) {
         if (args.next()) |arg| {
@@ -182,7 +183,7 @@ fn parseFlags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
     }
 
     if (@typeInfo(Flags) == .@"union") {
-        return parseCommand(args, Flags);
+        return parseCommand(io, args, Flags);
     }
 
     if (@typeInfo(Flags) != .@"struct") {
@@ -259,7 +260,7 @@ fn parseFlags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
         const arg = args.next() orelse break :parsing_next_arg;
         if (@hasDecl(Flags, "help") and parsed_args == 0) {
             if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-                var stdout = std.fs.File.stdout().writer(&.{});
+                var stdout = std.Io.File.stdout().writer(io, &.{});
                 const interface = &stdout.interface;
                 interface.writeAll(Flags.help) catch std.process.exit(1);
                 interface.writeAll("\n") catch std.process.exit(1);
@@ -349,7 +350,7 @@ fn parseFlags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
     return result;
 }
 
-fn parseCommand(args: *std.process.ArgIterator, comptime Command: type) Command {
+fn parseCommand(io: std.Io, args: *std.process.ArgIterator, comptime Command: type) Command {
     const info = @typeInfo(Command);
     if (info != .@"union") {
         @compileError("Expected union type, found '" ++ @typeName(Command) ++ "' when parsing command");
@@ -366,7 +367,7 @@ fn parseCommand(args: *std.process.ArgIterator, comptime Command: type) Command 
 
     const command: []const u8 = args.next() orelse {
         if (@hasDecl(Command, "help")) {
-            var stdout = std.fs.File.stdout().writer(&.{});
+            var stdout = std.Io.File.stdout().writer(io, &.{});
             const interface = &stdout.interface;
             interface.writeAll(Command.help) catch std.process.exit(1);
             interface.writeAll("\n") catch std.process.exit(1);

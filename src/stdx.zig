@@ -10,6 +10,7 @@ pub const DateTimeUTC = date_time.DateTimeUTC;
 pub const Arena = @import("arena.zig");
 pub const BitStream = @import("bitstream.zig");
 pub const png = @import("png.zig");
+pub const math = @import("math.zig");
 
 const root = @import("root");
 
@@ -29,7 +30,10 @@ pub const Options = struct {
 };
 
 pub fn logFatal(comptime format: []const u8, args: anytype) noreturn {
-    var stderr = std.fs.File.stderr().writer(&.{});
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.ioBasic();
+    io.unlockStderr();
+    var stderr = std.Io.File.stderr().writer(io, &.{});
     stderr.interface.print("ERROR: " ++ format ++ "\n", args) catch {};
     std.process.exit(1);
 }

@@ -771,7 +771,7 @@ inline fn ilog(x: i32) u32 {
 
 test "ogg decode" {
     const allocator = std.heap.page_allocator;
-    const ogg_data = try std.fs.cwd().readFileAlloc("assets/sounds/footstep00.ogg", allocator, .unlimited);
+    const ogg_data = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "assets/sounds/footstep00.ogg", allocator, .unlimited);
     defer allocator.free(ogg_data);
     const ogg_data_decoded = try decode(allocator, ogg_data);
     defer allocator.free(ogg_data_decoded);

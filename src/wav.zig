@@ -176,7 +176,7 @@ const ReaderState = enum(u8) {
 };
 
 test "wav decode" {
-    const wav_data = try std.fs.cwd().readFileAlloc("assets/sounds/pop.wav", std.testing.allocator, .unlimited);
+    const wav_data = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "assets/sounds/pop.wav", std.testing.allocator, .unlimited);
     defer std.testing.allocator.free(wav_data);
 
     const wav_data_decoded = try decode(std.testing.allocator, wav_data);
@@ -184,5 +184,5 @@ test "wav decode" {
 
     const wav_data_encoded = try encode(std.testing.allocator, wav_data_decoded);
     defer std.testing.allocator.free(wav_data_encoded);
-    try std.fs.cwd().writeFile(.{ .sub_path = "test_out.wav", .data = wav_data_encoded, .flags = .{} });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = "test_out.wav", .data = wav_data_encoded, .flags = .{} });
 }
