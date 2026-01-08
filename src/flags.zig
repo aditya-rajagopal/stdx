@@ -161,7 +161,7 @@ pub fn parseArgs(
     /// Allocator used to forward to the parseFlagValue function of the custom types in case they need to allocate memory for their own needs.
     /// The user is responsible for managing the lifetime of the memory allocated by the parseFlagValue function.
     gpa: std.mem.Allocator,
-    args: *std.process.ArgIterator,
+    args: *std.process.Args.Iterator,
     /// The type of the arguments to parse. Must be a struct or union
     comptime ArgType: type,
 ) ArgType {
@@ -173,7 +173,7 @@ pub fn parseArgs(
     return parseFlags(io, args, ArgType);
 }
 
-fn parseFlags(io: std.Io, args: *std.process.ArgIterator, comptime Flags: type) Flags {
+fn parseFlags(io: std.Io, args: *std.process.Args.Iterator, comptime Flags: type) Flags {
     @setEvalBranchQuota(5_000);
     if (Flags == void) {
         if (args.next()) |arg| {
@@ -350,7 +350,7 @@ fn parseFlags(io: std.Io, args: *std.process.ArgIterator, comptime Flags: type) 
     return result;
 }
 
-fn parseCommand(io: std.Io, args: *std.process.ArgIterator, comptime Command: type) Command {
+fn parseCommand(io: std.Io, args: *std.process.Args.Iterator, comptime Command: type) Command {
     const info = @typeInfo(Command);
     if (info != .@"union") {
         @compileError("Expected union type, found '" ++ @typeName(Command) ++ "' when parsing command");
