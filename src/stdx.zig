@@ -9,11 +9,11 @@ const date_time = @import("date_time_utc.zig");
 pub const DateTimeUTC = date_time.DateTimeUTC;
 
 pub const Arena = @import("arena.zig");
+
 pub const BitStream = @import("bitstream.zig");
 pub const png = @import("png.zig");
 
 const root = @import("root");
-
 /// Stdlib-wide options that can be overridden by the root file.
 pub const options: Options = if (@hasDecl(root, "stdx_options")) root.stdx_options else .default;
 
@@ -35,7 +35,7 @@ pub fn logFatal(comptime format: []const u8, args: anytype) noreturn {
     var locked_stderr = io.lockStderr(&.{}, null) catch unreachable;
     var stderr = locked_stderr.terminal();
     defer io.unlockStderr();
-    stderr.writer.print("ERROR: " ++ format ++ "\n", args) catch {};
+    stderr.writer.print("FATAL: " ++ format ++ "\n", args) catch {};
     std.process.exit(1);
 }
 
@@ -51,6 +51,8 @@ pub fn GB(gb: f32) usize {
     return @intFromFloat(gb * 1024 * 1024 * 1024);
 }
 
+/// Accepts 2 numbers either float or integer types and returns their division result as a float.
+/// This is just a convenience function to avoid doing all sorts of casting
 pub fn divIntToFloat(comptime Float: type, numerator: anytype, denominator: anytype) Float {
     const NType = @TypeOf(numerator);
     const DType = @TypeOf(denominator);
@@ -61,6 +63,17 @@ pub fn divIntToFloat(comptime Float: type, numerator: anytype, denominator: anyt
     const d: Float = if (comptime @typeInfo(DType) == .int) @floatFromInt(denominator) else @floatCast(denominator);
     return n / d;
 }
+
+const builtin = @import("builtin");
+//https://github.com/ghostty-org/ghostty/blob/26e243a9194f8653e0b44cf00b600629fcee8f46/src/quirks.zig
+pub const inlineAssert = switch (builtin.mode) {
+    .Debug => std.debug.assert,
+    .ReleaseFast, .ReleaseSafe, .ReleaseSmall => struct {
+        inline fn assert(cond: bool) void {
+            if (!cond) unreachable;
+        }
+    }.assert,
+};
 
 test {
     std.testing.refAllDecls(@This());
