@@ -1,5 +1,5 @@
 const std = @import("std");
-const assert = std.debug.assert;
+const assert = @import("stdx.zig").inlineAssert;
 
 const builtin = @import("builtin");
 const epoch = std.time.epoch;

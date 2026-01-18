@@ -194,7 +194,7 @@ It additionally provides an `std.mem.Allocator` interface so you can use it with
 
 ```zig
 const std = @import("std");
-const assert = std.debug.assert;
+const assert = @import("stdx.zig").inlineAssert;
 const stdx = @import("stdx");
 
 pub fn main() !void {

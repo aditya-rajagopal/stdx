@@ -1,5 +1,5 @@
 const std = @import("std");
-const assert = std.debug.assert;
+const assert = @import("stdx.zig").inlineAssert;
 
 const BitStream = @This();
 

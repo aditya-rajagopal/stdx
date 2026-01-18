@@ -12,7 +12,7 @@
 
 // @TODO: Add tests
 const std = @import("std");
-const assert = std.debug.assert;
+const assert = @import("stdx.zig").inlineAssert;
 
 const logFatal = @import("stdx.zig").logFatal;
 

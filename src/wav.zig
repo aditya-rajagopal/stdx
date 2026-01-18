@@ -1,5 +1,5 @@
 const std = @import("std");
-const assert = std.debug.assert;
+const assert = @import("stdx.zig").inlineAssert;
 
 pub const WavData = struct {
     /// Raw data
