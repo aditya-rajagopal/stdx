@@ -7,9 +7,6 @@ pub const flags = @import("flags.zig");
 const date_time = @import("date_time_utc.zig");
 pub const DateTimeUTC = date_time.DateTimeUTC;
 
-/// @DEPRECATED use `BufferPool` and `BufferPool.ArenaAllocator` instead.
-pub const Arena = @import("arena.zig");
-
 const pool = @import("pool.zig");
 pub const BufferPool = pool.BufferPool;
 pub const BufferPoolExtra = pool.BufferPoolExtra;
