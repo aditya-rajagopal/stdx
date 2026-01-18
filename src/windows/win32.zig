@@ -19,6 +19,11 @@ const FARPROC = windows.FARPROC;
 const HBRUSH = windows.HBRUSH;
 const POINT = windows.POINT;
 const LPVOID = windows.LPVOID;
+const PVOID = windows.PVOID;
+const ULONG = windows.ULONG;
+const ULONG64 = windows.ULONG64;
+const SIZE_T = windows.SIZE_T;
+const HANDLE = windows.HANDLE;
 
 pub const HMONITOR = *opaque {};
 
@@ -1215,6 +1220,116 @@ pub extern "gdi32" fn PatBlt(
     h: i32,
     rop: ROP_CODE,
 ) callconv(.winapi) BOOL;
+
+pub const PROTECTION = packed struct(u32) {
+    NOACCESS: bool = false,
+    READONLY: bool = false,
+    READWRITE: bool = false,
+    WRITECOPY: bool = false,
+
+    EXECUTE: bool = false,
+    EXECUTE_READ: bool = false,
+    EXECUTE_READWRITE: bool = false,
+    EXECUTE_WRITECOPY: bool = false,
+
+    GUARD: bool = false,
+    NOCACHE: bool = false,
+    WRITECOMBINE: bool = false,
+
+    GRAPHICS_NOACCESS: bool = false,
+    GRAPHICS_READONLY: bool = false,
+    GRAPHICS_READWRITE: bool = false,
+    GRAPHICS_EXECUTE: bool = false,
+    GRAPHICS_EXECUTE_READ: bool = false,
+    GRAPHICS_EXECUTE_READWRITE: bool = false,
+    GRAPHICS_COHERENT: bool = false,
+    GRAPHICS_NOCACHE: bool = false,
+
+    Reserved19: u12 = 0,
+
+    REVERT_TO_FILE_MAP: bool = false,
+};
+
+pub const MEM = struct {
+    pub const ALLOCATE = packed struct(ULONG) {
+        Reserved0: u12 = 0,
+        COMMIT: bool = false,
+        RESERVE: bool = false,
+        REPLACE_PLACEHOLDER: bool = false,
+        Reserved15: u3 = 0,
+        RESERVE_PLACEHOLDER: bool = false,
+        RESET: bool = false,
+        TOP_DOWN: bool = false,
+        WRITE_WATCH: bool = false,
+        PHYSICAL: bool = false,
+        Reserved23: u1 = 0,
+        RESET_UNDO: bool = false,
+        Reserved25: u4 = 0,
+        LARGE_PAGES: bool = false,
+        Reserved30: u1 = 0,
+        @"4MB_PAGES": bool = false,
+
+        pub const @"64K_PAGES": ALLOCATE = .{
+            .LARGE_PAGES = true,
+            .PHYSICAL = true,
+        };
+    };
+
+    pub const FREE = packed struct(ULONG) {
+        COALESCE_PLACEHOLDERS: bool = false,
+        PRESERVE_PLACEHOLDER: bool = false,
+        Reserved2: u12 = 0,
+        DECOMMIT: bool = false,
+        RELEASE: bool = false,
+        FREE: bool = false,
+        Reserved17: u15 = 0,
+    };
+
+    pub const MAP = packed struct(ULONG) {
+        Reserved0: u13 = 0,
+        RESERVE: bool = false,
+        REPLACE_PLACEHOLDER: bool = false,
+        Reserved15: u14 = 0,
+        LARGE_PAGES: bool = false,
+        Reserved30: u2 = 0,
+    };
+
+    pub const UNMAP = packed struct(ULONG) {
+        WITH_TRANSIENT_BOOST: bool = false,
+        PRESERVE_PLACEHOLDER: bool = false,
+        Reserved2: u30 = 0,
+    };
+
+    pub const EXTENDED_PARAMETER = extern struct {
+        s: packed struct(ULONG64) {
+            Type: TYPE,
+            Reserved: u56,
+        },
+        u: extern union {
+            ULong64: ULONG64,
+            Pointer: PVOID,
+            Size: SIZE_T,
+            Handle: HANDLE,
+            ULong: ULONG,
+        },
+
+        pub const TYPE = enum(u8) {
+            InvalidType = 0,
+            AddressRequirements,
+            NumaNode,
+            PartitionHandle,
+            UserPhysicalHandle,
+            AttributeFlags,
+            ImageMachine,
+            _,
+
+            pub const Max: @typeInfo(@This()).@"enum".tag_type = @typeInfo(@This()).@"enum".fields.len;
+        };
+    };
+};
+
+pub extern "kernel32" fn VirtualAlloc(lpAddress: ?*anyopaque, dwSize: usize, flAllocationType: MEM.ALLOCATE, flProtect: PROTECTION) callconv(.winapi) ?*anyopaque;
+pub extern "kernel32" fn VirtualFree(lpAddress: ?*anyopaque, dwSize: usize, dwFreeType: MEM.FREE) callconv(.winapi) c_int;
 
 pub fn typedConst(comptime T: type, comptime value: anytype) T {
     return typedConst2(T, T, value);

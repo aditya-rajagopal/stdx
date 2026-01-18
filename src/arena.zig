@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const assert = std.debug.assert;
+const assert = @import("stdx.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
 

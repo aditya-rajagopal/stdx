@@ -1,6 +1,7 @@
 ///! @TODO[[bowed_path_6n3]]
 const std = @import("std");
-const assert = std.debug.assert;
+
+const assert = @import("stdx.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 
 const stdx = @import("stdx.zig");
