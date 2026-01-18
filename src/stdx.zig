@@ -1,7 +1,6 @@
 const std = @import("std");
 const assert = @import("stdx.zig").inlineAssert;
 pub const wav = @import("wav.zig");
-pub const ogg_vorbis = @import("ogg_vorbis.zig");
 pub const flags = @import("flags.zig");
 
 const date_time = @import("date_time_utc.zig");
