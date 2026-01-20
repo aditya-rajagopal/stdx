@@ -13,7 +13,6 @@ pub const BufferPoolOptions = pool.Options;
 
 const growing_buffer = @import("growing_buffer.zig");
 pub const GrowingBuffer = growing_buffer.GrowingBuffer;
-pub const GrowingBufferOptions = growing_buffer.GrowingBufferOptions;
 
 pub const BitStream = @import("bitstream.zig");
 pub const png = @import("png.zig");

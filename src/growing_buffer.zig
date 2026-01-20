@@ -6,26 +6,23 @@ const assert = stdx.inlineAssert;
 
 const win32 = @import("windows/win32.zig");
 
-pub const GrowingBufferOptions = struct {
-    block_size: usize = std.heap.page_size_min,
-    size_limit: usize = 32,
-};
-
-pub fn GrowingBuffer(comptime options: GrowingBufferOptions) type {
-    const block_size = options.block_size;
+pub fn GrowingBuffer(comptime max_size_bytes: usize) type {
+    const page_size = std.heap.page_size_min;
     const alignment_bytes = std.heap.page_size_min;
-    if (comptime block_size % std.heap.page_size_min != 0) {
-        const msg = std.fmt.comptimePrint("block_size must be a multiple of page_size_min: {} but is {}", .{ std.mem.page_size_min, block_size });
+
+    const max_pages = @divFloor(max_size_bytes, page_size) + 1;
+
+    if (comptime page_size % std.heap.page_size_min != 0) {
+        const msg = std.fmt.comptimePrint("block_size must be a multiple of page_size_min: {} but is {}", .{ std.mem.page_size_min, page_size });
         @compileError(msg);
     }
     return struct {
         const Buffer = @This();
 
-        pub const memory_block_size = block_size;
         reserved_pages: []align(std.heap.page_size_min) u8,
 
-        pub const reserved_virtual_memory_bytes = block_size * max_pool_size;
-        pub const max_pool_size = options.size_limit;
+        pub const reserved_virtual_memory_bytes = page_size * max_pages;
+        pub const buffer_page_size = page_size;
 
         pub const empty = Buffer{
             .reserved_pages = &.{},
@@ -37,10 +34,10 @@ pub fn GrowingBuffer(comptime options: GrowingBufferOptions) type {
             return buffer;
         }
 
-        pub fn initCapacity(pool_size: usize) error{ OutOfMemory, ReserveFailed }!Buffer {
+        pub fn initCapacity(initial_size_bytes: usize) error{ OutOfMemory, ReserveFailed }!Buffer {
             var buffer: Buffer = try .init();
             errdefer buffer.deinit();
-            try buffer.grow(required_bytes(pool_size));
+            try buffer.grow(initial_size_bytes);
             return buffer;
         }
 
@@ -58,8 +55,8 @@ pub fn GrowingBuffer(comptime options: GrowingBufferOptions) type {
                 return error.OutOfMemory;
             }
             const increment = new_len - self.reserved_pages.len;
-            const num_blocks = @divFloor(increment, block_size) + 1;
-            try self.commitNewBlocks(num_blocks);
+            const num_pages = @divFloor(increment, page_size) + 1;
+            try self.commitNewBlocks(num_pages);
         }
 
         fn reserve(self: *Buffer) !void {
@@ -88,8 +85,8 @@ pub fn GrowingBuffer(comptime options: GrowingBufferOptions) type {
             }
         }
 
-        fn commitNewBlocks(self: *Buffer, num_blocks: usize) error{OutOfMemory}!void {
-            const num_bytes = required_bytes(num_blocks);
+        fn commitNewBlocks(self: *Buffer, num_pages: usize) error{OutOfMemory}!void {
+            const num_bytes = required_bytes(num_pages);
             assert(self.reserved_pages.len + num_bytes <= reserved_virtual_memory_bytes);
             const start_offset = self.reserved_pages.len;
             self.reserved_pages.len += num_bytes;
@@ -113,7 +110,7 @@ pub fn GrowingBuffer(comptime options: GrowingBufferOptions) type {
         }
 
         inline fn required_bytes(num_blocks: usize) usize {
-            return num_blocks * block_size;
+            return num_blocks * page_size;
         }
 
         pub const FixedBufferAllocator = struct {
@@ -284,7 +281,7 @@ pub fn GrowingBuffer(comptime options: GrowingBufferOptions) type {
 }
 
 test GrowingBuffer {
-    const Buffer = GrowingBuffer(.{ .block_size = std.heap.page_size_min, .size_limit = 64 });
+    const Buffer = GrowingBuffer(64 * std.heap.page_size_min);
     const fba = try Buffer.FixedBufferAllocator.init();
     var fixed_buffer_allocator = std.mem.validationWrap(fba);
     const a = fixed_buffer_allocator.allocator();
