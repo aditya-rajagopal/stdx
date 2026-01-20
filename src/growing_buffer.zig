@@ -124,10 +124,15 @@ pub fn GrowingBuffer(comptime max_size_bytes: usize) type {
             };
 
             pub fn init() error{ReserveFailed}!Self {
-                var buffer: Buffer = .empty;
-                try buffer.reserve();
                 return .{
-                    .buffer = buffer,
+                    .buffer = try Buffer.init(),
+                    .end_index = 0,
+                };
+            }
+
+            pub fn initCapacity(initial_size_bytes: usize) error{ OutOfMemory, ReserveFailed }!Self {
+                return .{
+                    .buffer = try Buffer.initCapacity(initial_size_bytes),
                     .end_index = 0,
                 };
             }
