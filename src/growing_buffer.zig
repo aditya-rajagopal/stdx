@@ -131,6 +131,11 @@ pub fn GrowingBuffer(comptime max_size_bytes: usize) type {
                     .end_index = 0,
                 };
             }
+
+            pub fn deinit(self: *Self) void {
+                self.buffer.deinit();
+            }
+
             /// Using this at the same time as the interface returned by `threadSafeAllocator` is not thread safe.
             pub fn allocator(self: *Self) std.mem.Allocator {
                 return .{
