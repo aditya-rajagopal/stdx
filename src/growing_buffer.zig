@@ -40,7 +40,7 @@ pub fn GrowingBuffer(comptime options: GrowingBufferOptions) type {
         pub fn initCapacity(pool_size: usize) error{ OutOfMemory, ReserveFailed }!Buffer {
             var buffer: Buffer = try .init();
             errdefer buffer.deinit();
-            try buffer.grow(pool_size);
+            try buffer.grow(required_bytes(pool_size));
             return buffer;
         }
 
