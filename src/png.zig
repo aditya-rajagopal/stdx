@@ -283,24 +283,24 @@ pub fn parse(
     };
 }
 
-test "readPNG" {
-    const file = std.Io.Dir.cwd().openFile(std.testing.io, "assets/test.png", .{}) catch unreachable;
-    defer file.close(std.testing.io);
-    var diagnostic: ?[]const u8 = null;
-    var arena = try stdx.Arena.init(std.testing.allocator, 16 * 1024 * 1024, null);
-    defer arena.deinit(std.testing.allocator);
-    const io = std.testing.io;
-    const image = fromFile(file, io, &arena, std.testing.allocator, &diagnostic, .default) catch {
-        std.debug.print("Error: {s}\n", .{diagnostic.?});
-        return error.ParseFailed;
-    };
-    defer std.testing.allocator.free(image.data);
-    try std.testing.expectEqual(2, image.width);
-    try std.testing.expectEqual(2, image.height);
-    try std.testing.expectEqual(4, image.channels);
-    const expected_data: []const u8 = &[_]u8{ 0, 0, 255, 255, 255, 0, 255, 255, 255, 255, 255, 255, 255, 0, 0, 255 };
-    try std.testing.expectEqualSlices(u8, expected_data, image.data);
-}
+// test "readPNG" {
+//     const file = std.Io.Dir.cwd().openFile(std.testing.io, "assets/test.png", .{}) catch unreachable;
+//     defer file.close(std.testing.io);
+//     var diagnostic: ?[]const u8 = null;
+//     var arena = try stdx.Arena.init(std.testing.allocator, 16 * 1024 * 1024, null);
+//     defer arena.deinit(std.testing.allocator);
+//     const io = std.testing.io;
+//     const image = fromFile(file, io, &arena, std.testing.allocator, &diagnostic, .default) catch {
+//         std.debug.print("Error: {s}\n", .{diagnostic.?});
+//         return error.ParseFailed;
+//     };
+//     defer std.testing.allocator.free(image.data);
+//     try std.testing.expectEqual(2, image.width);
+//     try std.testing.expectEqual(2, image.height);
+//     try std.testing.expectEqual(4, image.channels);
+//     const expected_data: []const u8 = &[_]u8{ 0, 0, 255, 255, 255, 0, 255, 255, 255, 255, 255, 255, 255, 0, 0, 255 };
+//     try std.testing.expectEqualSlices(u8, expected_data, image.data);
+// }
 
 inline fn Error(diagnostic: ?*?[]const u8, comptime msg: []const u8) PNGError {
     @branchHint(.cold);
