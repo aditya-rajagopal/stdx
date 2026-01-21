@@ -6,57 +6,62 @@ const assert = stdx.inlineAssert;
 
 const win32 = @import("windows/win32.zig");
 
-pub fn GrowingBuffer(comptime max_size_bytes: usize) type {
+pub fn GrowingBuffer(comptime E: type, comptime max_elements: usize) type {
     const page_size = std.heap.page_size_min;
     const alignment_bytes = std.heap.page_size_min;
 
-    const max_pages = @divFloor(max_size_bytes, page_size) + 1;
-
-    if (comptime page_size % std.heap.page_size_min != 0) {
-        const msg = std.fmt.comptimePrint("block_size must be a multiple of page_size_min: {} but is {}", .{ std.mem.page_size_min, page_size });
+    if (alignment_bytes % @alignOf(E) != 0) {
+        const msg = std.fmt.comptimePrint("Alignemnt of type {s} does not evenly divide page_size_min: {} has alignment {}", .{ @typeName(E), page_size, @alignOf(E) });
         @compileError(msg);
     }
+    if (page_size % @sizeOf(E) != 0) {
+        const msg = std.fmt.comptimePrint("Type {s} does not evenly divide page_size_min: {} has size {}", .{ @typeName(E), page_size, @sizeOf(E) });
+        @compileError(msg);
+    }
+
+    const max_size_bytes = max_elements * @sizeOf(E);
+
+    const max_pages = @divFloor(max_size_bytes, page_size) + 1;
+    const actual_max_elements = @divExact(max_pages * page_size, @sizeOf(E));
+
     return struct {
         const Buffer = @This();
 
-        reserved_pages: []align(std.heap.page_size_min) u8,
+        reserved_pages: []align(std.heap.page_size_min) E,
 
         pub const reserved_virtual_memory_bytes = page_size * max_pages;
         pub const buffer_page_size = page_size;
-
-        pub const empty = Buffer{
-            .reserved_pages = &.{},
-        };
+        pub const max_elements_count = actual_max_elements;
 
         pub fn init() error{ReserveFailed}!Buffer {
-            var buffer: Buffer = .empty;
+            var buffer: Buffer = undefined;
             try buffer.reserve();
             return buffer;
         }
 
-        pub fn initCapacity(initial_size_bytes: usize) error{ OutOfMemory, ReserveFailed }!Buffer {
+        pub fn initCapacity(initial_capacity_elements: usize) error{ OutOfMemory, ReserveFailed }!Buffer {
             var buffer: Buffer = try .init();
             errdefer buffer.deinit();
-            try buffer.grow(initial_size_bytes);
+            try buffer.ensureTotalCapacity(initial_capacity_elements);
             return buffer;
         }
 
         pub fn deinit(self: *Buffer) void {
-            self.reserved_pages.len = reserved_virtual_memory_bytes;
+            self.reserved_pages.len = actual_max_elements;
+            const bytes = @as([*]align(alignment_bytes) u8, @ptrCast(@alignCast(self.reserved_pages.ptr)))[0..reserved_virtual_memory_bytes];
             switch (builtin.os.tag) {
-                .windows => win32.VirtualFree(@ptrCast(self.reserved_pages.ptr), 0, .{ .RELEASE = true }),
-                else => std.posix.munmap(self.reserved_pages),
+                .windows => win32.VirtualFree(@ptrCast(bytes.ptr), bytes.len, .{ .RELEASE = true }),
+                else => std.posix.munmap(bytes),
             }
         }
 
-        pub fn grow(self: *Buffer, new_len: usize) error{OutOfMemory}!void {
-            if (new_len <= self.reserved_pages.len) return;
-            if (new_len > reserved_virtual_memory_bytes) {
+        pub fn ensureTotalCapacity(self: *Buffer, capacity: usize) error{OutOfMemory}!void {
+            if (capacity <= self.reserved_pages.len) return;
+            if (capacity > max_elements_count) {
                 return error.OutOfMemory;
             }
-            const increment = new_len - self.reserved_pages.len;
-            const num_pages = @divFloor(increment, page_size) + 1;
-            try self.commitNewBlocks(num_pages);
+            const increment = capacity - self.reserved_pages.len;
+            try self.commitNewBlocks(increment);
         }
 
         fn reserve(self: *Buffer) !void {
@@ -68,11 +73,11 @@ pub fn GrowingBuffer(comptime max_size_bytes: usize) type {
                         .{ .RESERVE = true },
                         .{ .READWRITE = true },
                     ) orelse return error.ReserveFailed;
-                    self.reserved_pages = @as([*]align(alignment_bytes) u8, @ptrCast(@alignCast(ptr)))[0..reserved_virtual_memory_bytes];
+                    self.reserved_pages = @as([*]align(alignment_bytes) E, @ptrCast(@alignCast(ptr)))[0..actual_max_elements];
                     self.reserved_pages.len = 0;
                 },
                 else => {
-                    self.reserved_pages = std.posix.mmap(
+                    const bytes = std.posix.mmap(
                         null,
                         reserved_virtual_memory_bytes,
                         std.posix.PROT.NONE,
@@ -80,219 +85,226 @@ pub fn GrowingBuffer(comptime max_size_bytes: usize) type {
                         -1,
                         0,
                     ) catch return error.ReserveFailed;
+                    self.reserved_pages = @as([*]align(alignment_bytes) E, @ptrCast(@alignCast(bytes)))[0..actual_max_elements];
                     self.reserved_pages.len = 0;
                 },
             }
         }
 
-        fn commitNewBlocks(self: *Buffer, num_pages: usize) error{OutOfMemory}!void {
-            const num_bytes = required_bytes(num_pages);
-            assert(self.reserved_pages.len + num_bytes <= reserved_virtual_memory_bytes);
-            const start_offset = self.reserved_pages.len;
-            self.reserved_pages.len += num_bytes;
+        fn commitNewBlocks(self: *Buffer, num_elements: usize) error{OutOfMemory}!void {
+            assert(self.reserved_pages.len + num_elements <= max_elements_count);
+            const num_bytes = required_bytes(num_elements);
+            const new_pages = @divFloor(num_bytes, page_size) + 1;
+            const bytes = @as([*]align(alignment_bytes) u8, @ptrCast(@alignCast(self.reserved_pages.ptr)));
+            const start_offset = self.reserved_pages.len * @sizeOf(E);
+            const num_bytes_to_commit = new_pages * page_size;
+            self.reserved_pages.len += @divExact(num_bytes_to_commit, @sizeOf(E));
 
             switch (builtin.os.tag) {
                 .windows => {
                     _ = try win32.VirtualAlloc(
-                        @ptrCast(@alignCast(self.reserved_pages[start_offset..][0..num_bytes])),
-                        num_bytes,
+                        @ptrCast(@alignCast(bytes)),
+                        num_bytes_to_commit,
                         .{ .RESERVE = true, .COMMIT = true },
                         .{ .READWRITE = true },
                     ) orelse return error.OutOfMemory;
                 },
                 else => {
-                    const memory: []align(std.heap.page_size_min) u8 = @alignCast(self.reserved_pages[start_offset..][0..num_bytes]);
-                    std.posix.mprotect(@ptrCast(@alignCast(memory)), std.posix.PROT.READ | std.posix.PROT.WRITE) catch {
+                    const memory: []align(std.heap.page_size_min) u8 = @alignCast(bytes[start_offset..][0..num_bytes_to_commit]);
+                    std.posix.mprotect(memory, std.posix.PROT.READ | std.posix.PROT.WRITE) catch {
                         return error.OutOfMemory;
                     };
                 },
             }
         }
 
-        inline fn required_bytes(num_blocks: usize) usize {
-            return num_blocks * page_size;
+        inline fn required_bytes(num_elements: usize) usize {
+            return num_elements * @sizeOf(E);
         }
-
-        pub const FixedBufferAllocator = struct {
-            const Self = @This();
-            end_index: usize,
-            buffer: Buffer,
-
-            pub const empty = Self{
-                .buffer = .empty,
-                .end_index = 0,
-            };
-
-            pub fn init() error{ReserveFailed}!Self {
-                return .{
-                    .buffer = try Buffer.init(),
-                    .end_index = 0,
-                };
-            }
-
-            pub fn initCapacity(initial_size_bytes: usize) error{ OutOfMemory, ReserveFailed }!Self {
-                return .{
-                    .buffer = try Buffer.initCapacity(initial_size_bytes),
-                    .end_index = 0,
-                };
-            }
-
-            pub fn deinit(self: *Self) void {
-                self.buffer.deinit();
-            }
-
-            /// Using this at the same time as the interface returned by `threadSafeAllocator` is not thread safe.
-            pub fn allocator(self: *Self) std.mem.Allocator {
-                return .{
-                    .ptr = self,
-                    .vtable = &.{
-                        .alloc = alloc,
-                        .resize = resize,
-                        .remap = remap,
-                        .free = free,
-                    },
-                };
-            }
-
-            /// Provides a lock free thread safe `Allocator` interface to the underlying `FixedBufferAllocator`
-            ///
-            /// Using this at the same time as the interface returned by `allocator` is not thread safe.
-            pub fn threadSafeAllocator(self: *Self) std.mem.Allocator {
-                return .{
-                    .ptr = self,
-                    .vtable = &.{
-                        .alloc = threadSafeAlloc,
-                        .resize = std.mem.Allocator.noResize,
-                        .remap = std.mem.Allocator.noRemap,
-                        .free = std.mem.Allocator.noFree,
-                    },
-                };
-            }
-
-            pub fn ownsPtr(self: *Self, ptr: [*]u8) bool {
-                return sliceContainsPtr(self.buffer.reserved_pages, ptr);
-            }
-
-            pub fn ownsSlice(self: *Self, slice: []u8) bool {
-                return sliceContainsSlice(self.buffer.reserved_pages, slice);
-            }
-
-            /// This has false negatives when the last allocation had an
-            /// adjusted_index. In such case we won't be able to determine what the
-            /// last allocation was because the alignForward operation done in alloc is
-            /// not reversible.
-            pub fn isLastAllocation(self: *Self, buf: []u8) bool {
-                return buf.ptr + buf.len == self.buffer.reserved_pages.ptr + self.end_index;
-            }
-
-            pub fn alloc(ctx: *anyopaque, n: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
-                const self: *Self = @ptrCast(@alignCast(ctx));
-                _ = ra;
-                const ptr_align = alignment.toByteUnits();
-                const adjust_off = std.mem.alignPointerOffset(self.buffer.reserved_pages.ptr + self.end_index, ptr_align) orelse return null;
-                const adjusted_index = self.end_index + adjust_off;
-                const new_end_index = adjusted_index + n;
-                if (new_end_index > self.buffer.reserved_pages.len) {
-                    self.buffer.grow(new_end_index) catch return null;
-                }
-                self.end_index = new_end_index;
-                return self.buffer.reserved_pages.ptr + adjusted_index;
-            }
-
-            pub fn resize(
-                ctx: *anyopaque,
-                buf: []u8,
-                alignment: std.mem.Alignment,
-                new_size: usize,
-                return_address: usize,
-            ) bool {
-                const self: *Self = @ptrCast(@alignCast(ctx));
-                _ = alignment;
-                _ = return_address;
-                assert(@inComptime() or self.ownsSlice(buf));
-
-                if (!self.isLastAllocation(buf)) {
-                    if (new_size > buf.len) return false;
-                    return true;
-                }
-
-                if (new_size <= buf.len) {
-                    const sub = buf.len - new_size;
-                    self.end_index -= sub;
-                    return true;
-                }
-
-                const add = new_size - buf.len;
-                if (add + self.end_index > self.buffer.reserved_pages.len) {
-                    self.buffer.grow(add + self.end_index) catch return false;
-                }
-                self.end_index += add;
-                return true;
-            }
-
-            pub fn remap(
-                context: *anyopaque,
-                memory: []u8,
-                alignment: std.mem.Alignment,
-                new_len: usize,
-                return_address: usize,
-            ) ?[*]u8 {
-                return if (resize(context, memory, alignment, new_len, return_address)) memory.ptr else null;
-            }
-
-            pub fn free(
-                ctx: *anyopaque,
-                buf: []u8,
-                alignment: std.mem.Alignment,
-                return_address: usize,
-            ) void {
-                const self: *Self = @ptrCast(@alignCast(ctx));
-                _ = alignment;
-                _ = return_address;
-                assert(@inComptime() or self.ownsSlice(buf));
-
-                if (self.isLastAllocation(buf)) {
-                    self.end_index -= buf.len;
-                }
-            }
-
-            fn threadSafeAlloc(ctx: *anyopaque, n: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
-                const self: *Self = @ptrCast(@alignCast(ctx));
-                _ = ra;
-                const ptr_align = alignment.toByteUnits();
-                var end_index = @atomicLoad(usize, &self.end_index, .seq_cst);
-                while (true) {
-                    const adjust_off = std.mem.alignPointerOffset(self.buffer.ptr + end_index, ptr_align) orelse return null;
-                    const adjusted_index = end_index + adjust_off;
-                    const new_end_index = adjusted_index + n;
-                    if (new_end_index > self.buffer.len) {
-                        self.buffer.grow(1) catch return null;
-                    }
-                    end_index = @cmpxchgWeak(usize, &self.end_index, end_index, new_end_index, .seq_cst, .seq_cst) orelse
-                        return self.buffer[adjusted_index..new_end_index].ptr;
-                }
-            }
-
-            pub fn reset(self: *Self) void {
-                self.end_index = 0;
-            }
-
-            fn sliceContainsPtr(container: []u8, ptr: [*]u8) bool {
-                return @intFromPtr(ptr) >= @intFromPtr(container.ptr) and
-                    @intFromPtr(ptr) < (@intFromPtr(container.ptr) + container.len);
-            }
-
-            fn sliceContainsSlice(container: []u8, slice: []u8) bool {
-                return @intFromPtr(slice.ptr) >= @intFromPtr(container.ptr) and
-                    (@intFromPtr(slice.ptr) + slice.len) <= (@intFromPtr(container.ptr) + container.len);
-            }
-        };
     };
 }
 
-test GrowingBuffer {
-    const Buffer = GrowingBuffer(64 * std.heap.page_size_min);
-    const fba = try Buffer.FixedBufferAllocator.init();
+pub fn FixedGrowingBufferAllocator(comptime max_bytes: usize) type {
+    return struct {
+        const Self = @This();
+        end_index: usize,
+        buffer: Buffer,
+
+        pub const Buffer = GrowingBuffer(u8, max_bytes);
+
+        pub const empty = Self{
+            .buffer = .empty,
+            .end_index = 0,
+        };
+
+        pub fn init() error{ReserveFailed}!Self {
+            return .{
+                .buffer = try Buffer.init(),
+                .end_index = 0,
+            };
+        }
+
+        pub fn initCapacity(initial_size_bytes: usize) error{ OutOfMemory, ReserveFailed }!Self {
+            return .{
+                .buffer = try Buffer.initCapacity(initial_size_bytes),
+                .end_index = 0,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.buffer.deinit();
+        }
+
+        /// Using this at the same time as the interface returned by `threadSafeAllocator` is not thread safe.
+        pub fn allocator(self: *Self) std.mem.Allocator {
+            return .{
+                .ptr = self,
+                .vtable = &.{
+                    .alloc = alloc,
+                    .resize = resize,
+                    .remap = remap,
+                    .free = free,
+                },
+            };
+        }
+
+        /// Provides a lock free thread safe `Allocator` interface to the underlying `FixedBufferAllocator`
+        ///
+        /// Using this at the same time as the interface returned by `allocator` is not thread safe.
+        pub fn threadSafeAllocator(self: *Self) std.mem.Allocator {
+            return .{
+                .ptr = self,
+                .vtable = &.{
+                    .alloc = threadSafeAlloc,
+                    .resize = std.mem.Allocator.noResize,
+                    .remap = std.mem.Allocator.noRemap,
+                    .free = std.mem.Allocator.noFree,
+                },
+            };
+        }
+
+        pub fn ownsPtr(self: *Self, ptr: [*]u8) bool {
+            return sliceContainsPtr(self.buffer.reserved_pages, ptr);
+        }
+
+        pub fn ownsSlice(self: *Self, slice: []u8) bool {
+            return sliceContainsSlice(self.buffer.reserved_pages, slice);
+        }
+
+        /// This has false negatives when the last allocation had an
+        /// adjusted_index. In such case we won't be able to determine what the
+        /// last allocation was because the alignForward operation done in alloc is
+        /// not reversible.
+        pub fn isLastAllocation(self: *Self, buf: []u8) bool {
+            return buf.ptr + buf.len == self.buffer.reserved_pages.ptr + self.end_index;
+        }
+
+        pub fn alloc(ctx: *anyopaque, n: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            _ = ra;
+            const ptr_align = alignment.toByteUnits();
+            const adjust_off = std.mem.alignPointerOffset(self.buffer.reserved_pages.ptr + self.end_index, ptr_align) orelse return null;
+            const adjusted_index = self.end_index + adjust_off;
+            const new_end_index = adjusted_index + n;
+            if (new_end_index > self.buffer.reserved_pages.len) {
+                self.buffer.ensureTotalCapacity(new_end_index) catch return null;
+            }
+            self.end_index = new_end_index;
+            return self.buffer.reserved_pages.ptr + adjusted_index;
+        }
+
+        pub fn resize(
+            ctx: *anyopaque,
+            buf: []u8,
+            alignment: std.mem.Alignment,
+            new_size: usize,
+            return_address: usize,
+        ) bool {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            _ = alignment;
+            _ = return_address;
+            assert(@inComptime() or self.ownsSlice(buf));
+
+            if (!self.isLastAllocation(buf)) {
+                if (new_size > buf.len) return false;
+                return true;
+            }
+
+            if (new_size <= buf.len) {
+                const sub = buf.len - new_size;
+                self.end_index -= sub;
+                return true;
+            }
+
+            const add = new_size - buf.len;
+            if (add + self.end_index > self.buffer.reserved_pages.len) {
+                self.buffer.ensureTotalCapacity(add + self.end_index) catch return false;
+            }
+            self.end_index += add;
+            return true;
+        }
+
+        pub fn remap(
+            context: *anyopaque,
+            memory: []u8,
+            alignment: std.mem.Alignment,
+            new_len: usize,
+            return_address: usize,
+        ) ?[*]u8 {
+            return if (resize(context, memory, alignment, new_len, return_address)) memory.ptr else null;
+        }
+
+        pub fn free(
+            ctx: *anyopaque,
+            buf: []u8,
+            alignment: std.mem.Alignment,
+            return_address: usize,
+        ) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            _ = alignment;
+            _ = return_address;
+            assert(@inComptime() or self.ownsSlice(buf));
+
+            if (self.isLastAllocation(buf)) {
+                self.end_index -= buf.len;
+            }
+        }
+
+        fn threadSafeAlloc(ctx: *anyopaque, n: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            _ = ra;
+            const ptr_align = alignment.toByteUnits();
+            var end_index = @atomicLoad(usize, &self.end_index, .seq_cst);
+            while (true) {
+                const adjust_off = std.mem.alignPointerOffset(self.buffer.reserved_pages.ptr + end_index, ptr_align) orelse return null;
+                const adjusted_index = end_index + adjust_off;
+                const new_end_index = adjusted_index + n;
+                if (new_end_index > self.buffer.reserved_pages.len) {
+                    self.buffer.ensureTotalCapacity(new_end_index) catch return null;
+                }
+                end_index = @cmpxchgWeak(usize, &self.end_index, end_index, new_end_index, .seq_cst, .seq_cst) orelse
+                    return self.buffer.reserved_pages[adjusted_index..new_end_index].ptr;
+            }
+        }
+
+        pub fn reset(self: *Self) void {
+            self.end_index = 0;
+        }
+
+        fn sliceContainsPtr(container: []u8, ptr: [*]u8) bool {
+            return @intFromPtr(ptr) >= @intFromPtr(container.ptr) and
+                @intFromPtr(ptr) < (@intFromPtr(container.ptr) + container.len);
+        }
+
+        fn sliceContainsSlice(container: []u8, slice: []u8) bool {
+            return @intFromPtr(slice.ptr) >= @intFromPtr(container.ptr) and
+                (@intFromPtr(slice.ptr) + slice.len) <= (@intFromPtr(container.ptr) + container.len);
+        }
+    };
+}
+
+test FixedGrowingBufferAllocator {
+    const fba = try FixedGrowingBufferAllocator(64 * std.heap.page_size_min).init();
     var fixed_buffer_allocator = std.mem.validationWrap(fba);
     const a = fixed_buffer_allocator.allocator();
 
@@ -300,4 +312,53 @@ test GrowingBuffer {
     try std.heap.testAllocatorAligned(a);
     try std.heap.testAllocatorLargeAlignment(a);
     try std.heap.testAllocatorAlignedShrink(a);
+}
+
+test "GrowingBuffer init/deinit" {
+    const GB = GrowingBuffer(u64, 100);
+    var gb = try GB.init();
+    defer gb.deinit();
+
+    try std.testing.expect(gb.reserved_pages.len == 0);
+}
+
+test "GrowingBuffer initCapacity" {
+    const GB = GrowingBuffer(u64, 100);
+    const initial_bytes = 64;
+    var gb = try GB.initCapacity(initial_bytes);
+    defer gb.deinit();
+
+    try std.testing.expectEqual(std.heap.page_size_min / @sizeOf(u64), gb.reserved_pages.len);
+}
+
+test "GrowingBuffer ensureTotalCapacity within max" {
+    const GB = GrowingBuffer(u64, 100);
+    var gb = try GB.init();
+    defer gb.deinit();
+
+    try gb.ensureTotalCapacity(50);
+    try std.testing.expectEqual(std.heap.page_size_min / @sizeOf(u64), gb.reserved_pages.len);
+    try gb.ensureTotalCapacity(100);
+    try std.testing.expectEqual(std.heap.page_size_min / @sizeOf(u64), gb.reserved_pages.len);
+}
+
+test "GrowingBuffer ensureTotalCapacity beyond max" {
+    const GB = GrowingBuffer(u64, 100);
+    var gb = try GB.init();
+    defer gb.deinit();
+
+    try std.testing.expectError(error.OutOfMemory, gb.ensureTotalCapacity(GB.max_elements_count + 1));
+}
+
+test "GrowingBuffer page boundary crossing" {
+    const GB = GrowingBuffer(u8, std.heap.page_size_min * 3);
+    var gb = try GB.init();
+    defer gb.deinit();
+
+    const first_page = std.heap.page_size_min - 1;
+    try gb.ensureTotalCapacity(first_page);
+    try std.testing.expectEqual(std.heap.page_size_min, gb.reserved_pages.len);
+
+    try gb.ensureTotalCapacity(std.heap.page_size_min + 1);
+    try std.testing.expectEqual(std.heap.page_size_min * 2, gb.reserved_pages.len);
 }
