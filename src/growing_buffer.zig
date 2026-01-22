@@ -73,7 +73,7 @@ pub fn GrowingBuffer(comptime E: type) type {
                     const bytes = std.posix.mmap(
                         null,
                         pages * page_size,
-                        std.posix.PROT.NONE,
+                        .{}, // PROT.NONE
                         .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
                         -1,
                         0,
@@ -116,9 +116,7 @@ pub fn GrowingBuffer(comptime E: type) type {
                 },
                 else => {
                     const memory: []align(std.heap.page_size_min) u8 = @alignCast(bytes[start_offset..][0..num_bytes_to_commit]);
-                    std.posix.mprotect(memory, std.posix.PROT.READ | std.posix.PROT.WRITE) catch {
-                        return error.OutOfMemory;
-                    };
+                    std.process.protectMemory(memory, .{ .read = true, .write = true }) catch return error.OutOfMemory;
                 },
             }
         }

@@ -1365,7 +1365,7 @@ pub fn typedConst2(comptime ReturnType: type, comptime SwitchType: type, comptim
             .pointer => return typedConst2(ReturnType, target_type_info.child, value),
             else => target_type_error,
         },
-        .@"enum" => |_| switch (@typeInfo(@TypeOf(value))) {
+        .@"enum" => switch (@typeInfo(@TypeOf(value))) {
             .int => return @as(ReturnType, @enumFromInt(value)),
             else => target_type_error,
         },

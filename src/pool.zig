@@ -121,7 +121,7 @@ pub fn BufferPoolExtra(comptime options: Options) type {
         fn reserve(self: *Pool) !void {
             switch (builtin.os.tag) {
                 .windows => {
-                    const ptr = try win32.VirtualAlloc(
+                    const ptr = win32.VirtualAlloc(
                         null,
                         reserved_virtual_memory_bytes,
                         .{ .RESERVE = true },
@@ -134,7 +134,7 @@ pub fn BufferPoolExtra(comptime options: Options) type {
                     self.reserved_pages = std.posix.mmap(
                         null,
                         reserved_virtual_memory_bytes,
-                        std.posix.PROT.NONE,
+                        .{}, // PROT.NONE
                         .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
                         -1,
                         0,
@@ -150,7 +150,7 @@ pub fn BufferPoolExtra(comptime options: Options) type {
 
             switch (builtin.os.tag) {
                 .windows => {
-                    const ptr = try win32.VirtualAlloc(
+                    const ptr = win32.VirtualAlloc(
                         @ptrCast(@alignCast(self.reserved_pages[start_offset..][0..block_size])),
                         block_size,
                         .{ .RESERVE = true, .COMMIT = true },
@@ -161,9 +161,7 @@ pub fn BufferPoolExtra(comptime options: Options) type {
                 },
                 else => {
                     const memory: []align(std.heap.page_size_min) u8 = @alignCast(self.reserved_pages[start_offset..][0..block_size]);
-                    std.posix.mprotect(@ptrCast(@alignCast(memory)), std.posix.PROT.READ | std.posix.PROT.WRITE) catch {
-                        return error.OutOfMemory;
-                    };
+                    std.process.protectMemory(memory, .{ .read = true, .write = true }) catch return error.OutOfMemory;
                     return memory[0..block_size];
                 },
             }
