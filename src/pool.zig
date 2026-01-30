@@ -1,13 +1,32 @@
+//! WIP
 const std = @import("std");
 const builtin = @import("builtin");
 const Alignment = std.mem.Alignment;
-const win32 = @import("windows/win32.zig");
 
-const stdx = @import("stdx.zig");
-const assert = stdx.inlineAssert;
+//https://github.com/ghostty-org/ghostty/blob/26e243a9194f8653e0b44cf00b600629fcee8f46/src/quirks.zig
+pub const assert = switch (builtin.mode) {
+    .Debug => std.debug.assert,
+    .ReleaseFast, .ReleaseSafe, .ReleaseSmall => struct {
+        inline fn assert(cond: bool) void {
+            if (!cond) unreachable;
+        }
+    }.assert,
+};
+
+pub fn KB(kb: f32) usize {
+    return @intFromFloat(kb * 1024);
+}
+
+pub fn MB(mb: f32) usize {
+    return @intFromFloat(mb * 1024 * 1024);
+}
+
+pub fn GB(gb: f32) usize {
+    return @intFromFloat(gb * 1024 * 1024 * 1024);
+}
 
 pub const Options = struct {
-    block_size: usize = stdx.MB(4),
+    block_size: usize = MB(4),
     size_limit: usize = 1024,
     metrics: bool = switch (builtin.mode) {
         .Debug => true,
@@ -70,7 +89,7 @@ pub fn BufferPoolExtra(comptime options: Options) type {
         pub fn deinit(self: *Pool) void {
             self.reserved_pages.len = reserved_virtual_memory_bytes;
             switch (builtin.os.tag) {
-                .windows => win32.VirtualFree(@ptrCast(self.reserved_pages.ptr), 0, .{ .RELEASE = true }),
+                .windows => VirtualFree(@ptrCast(self.reserved_pages.ptr), 0, .{ .RELEASE = true }),
                 else => std.posix.munmap(self.reserved_pages),
             }
         }
@@ -121,7 +140,7 @@ pub fn BufferPoolExtra(comptime options: Options) type {
         fn reserve(self: *Pool) !void {
             switch (builtin.os.tag) {
                 .windows => {
-                    const ptr = win32.VirtualAlloc(
+                    const ptr = VirtualAlloc(
                         null,
                         reserved_virtual_memory_bytes,
                         .{ .RESERVE = true },
@@ -150,7 +169,7 @@ pub fn BufferPoolExtra(comptime options: Options) type {
 
             switch (builtin.os.tag) {
                 .windows => {
-                    const ptr = win32.VirtualAlloc(
+                    const ptr = VirtualAlloc(
                         @ptrCast(@alignCast(self.reserved_pages[start_offset..][0..block_size])),
                         block_size,
                         .{ .RESERVE = true, .COMMIT = true },
@@ -425,6 +444,122 @@ pub fn BufferPoolExtra(comptime options: Options) type {
     };
 }
 
+pub const PROTECTION = packed struct(u32) {
+    NOACCESS: bool = false,
+    READONLY: bool = false,
+    READWRITE: bool = false,
+    WRITECOPY: bool = false,
+
+    EXECUTE: bool = false,
+    EXECUTE_READ: bool = false,
+    EXECUTE_READWRITE: bool = false,
+    EXECUTE_WRITECOPY: bool = false,
+
+    GUARD: bool = false,
+    NOCACHE: bool = false,
+    WRITECOMBINE: bool = false,
+
+    GRAPHICS_NOACCESS: bool = false,
+    GRAPHICS_READONLY: bool = false,
+    GRAPHICS_READWRITE: bool = false,
+    GRAPHICS_EXECUTE: bool = false,
+    GRAPHICS_EXECUTE_READ: bool = false,
+    GRAPHICS_EXECUTE_READWRITE: bool = false,
+    GRAPHICS_COHERENT: bool = false,
+    GRAPHICS_NOCACHE: bool = false,
+
+    Reserved19: u12 = 0,
+
+    REVERT_TO_FILE_MAP: bool = false,
+};
+
+const ULONG = std.os.windows.ULONG;
+const ULONG64 = std.os.windows.ULONG64;
+const SIZE_T = std.os.windows.SIZE_T;
+const HANDLE = std.os.windows.HANDLE;
+const PVOID = std.os.windows.PVOID;
+
+pub const MEM = struct {
+    pub const ALLOCATE = packed struct(ULONG) {
+        Reserved0: u12 = 0,
+        COMMIT: bool = false,
+        RESERVE: bool = false,
+        REPLACE_PLACEHOLDER: bool = false,
+        Reserved15: u3 = 0,
+        RESERVE_PLACEHOLDER: bool = false,
+        RESET: bool = false,
+        TOP_DOWN: bool = false,
+        WRITE_WATCH: bool = false,
+        PHYSICAL: bool = false,
+        Reserved23: u1 = 0,
+        RESET_UNDO: bool = false,
+        Reserved25: u4 = 0,
+        LARGE_PAGES: bool = false,
+        Reserved30: u1 = 0,
+        @"4MB_PAGES": bool = false,
+
+        pub const @"64K_PAGES": ALLOCATE = .{
+            .LARGE_PAGES = true,
+            .PHYSICAL = true,
+        };
+    };
+
+    pub const FREE = packed struct(ULONG) {
+        COALESCE_PLACEHOLDERS: bool = false,
+        PRESERVE_PLACEHOLDER: bool = false,
+        Reserved2: u12 = 0,
+        DECOMMIT: bool = false,
+        RELEASE: bool = false,
+        FREE: bool = false,
+        Reserved17: u15 = 0,
+    };
+
+    pub const MAP = packed struct(ULONG) {
+        Reserved0: u13 = 0,
+        RESERVE: bool = false,
+        REPLACE_PLACEHOLDER: bool = false,
+        Reserved15: u14 = 0,
+        LARGE_PAGES: bool = false,
+        Reserved30: u2 = 0,
+    };
+
+    pub const UNMAP = packed struct(ULONG) {
+        WITH_TRANSIENT_BOOST: bool = false,
+        PRESERVE_PLACEHOLDER: bool = false,
+        Reserved2: u30 = 0,
+    };
+
+    pub const EXTENDED_PARAMETER = extern struct {
+        s: packed struct(ULONG64) {
+            Type: TYPE,
+            Reserved: u56,
+        },
+        u: extern union {
+            ULong64: ULONG64,
+            Pointer: PVOID,
+            Size: SIZE_T,
+            Handle: HANDLE,
+            ULong: ULONG,
+        },
+
+        pub const TYPE = enum(u8) {
+            InvalidType = 0,
+            AddressRequirements,
+            NumaNode,
+            PartitionHandle,
+            UserPhysicalHandle,
+            AttributeFlags,
+            ImageMachine,
+            _,
+
+            pub const Max: @typeInfo(@This()).@"enum".tag_type = @typeInfo(@This()).@"enum".fields.len;
+        };
+    };
+};
+
+pub extern "kernel32" fn VirtualAlloc(lpAddress: ?*anyopaque, dwSize: usize, flAllocationType: MEM.ALLOCATE, flProtect: PROTECTION) callconv(.winapi) ?*anyopaque;
+pub extern "kernel32" fn VirtualFree(lpAddress: ?*anyopaque, dwSize: usize, dwFreeType: MEM.FREE) callconv(.winapi) c_int;
+
 test "PoolArenaAllocator" {
     const Pool = BufferPoolExtra(.{});
     const Arena = Pool.ArenaAllocator;
@@ -581,3 +716,53 @@ test "arena deinit returns all blocks" {
     try std.testing.expectEqual(@as(usize, 0), pool.metrics.acquires_current);
     try std.testing.expectEqual(@as(usize, 3), pool.metrics.releases_total);
 }
+
+// This software is available under two licenses -- choose whichever you
+// prefer.
+//
+// ----------------------------------------------------------------------
+// License 1 -- MIT No Attribution (MIT-0)
+//
+// Copyright (c) 2025 Aditya Rajagopal
+//
+// Permission is hereby granted, free of charge, to any person obtaining
+// a copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to
+// permit persons to whom the Software is furnished to do so.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+// CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+// TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+// SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+// ----------------------------------------------------------------------
+// License 2 -- Unlicense <https://unlicense.org>
+//
+// This is free and unencumbered software released into the public
+// domain.
+//
+// Anyone is free to copy, modify, publish, use, compile, sell, or
+// distribute this software, either in source code form or as a compiled
+// binary, for any purpose, commercial or non-commercial, and by any
+// means.
+//
+// In jurisdictions that recognize copyright laws, the author or authors
+// of this software dedicate any and all copyright interest in the
+// software to the public domain. We make this dedication for the benefit
+// of the public at large and to the detriment of our heirs and
+// successors. We intend this dedication to be an overt act of
+// relinquishment in perpetuity of all present and future rights to this
+// software under copyright law.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+// OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+// ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+// OTHER DEALINGS IN THE SOFTWARE.

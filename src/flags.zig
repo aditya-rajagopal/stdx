@@ -1,4 +1,4 @@
-//! This file provides a very simple argument parser for zig.
+//! Parse CLI arguments for subcommands specified as Zig `struct` or `union(enum)`:
 //!
 //! It is pretty much taken from the tigerbeetle project.
 //! https://github.com/tigerbeetle/tigerbeetle/blob/16d62f0ce7d4ef3db58714c9b7a0c46480c19bc3/src/flags.zig
@@ -9,19 +9,178 @@
 //! * I added help flags to commands in addition to the help flag for the program
 //! * I prefer the zig style nameing convention for function names as i like to do things like `const default_value = defaultValue(xyz);`
 //! * Added floating point numbers
+//!
+//! - `union` is treated as commands
+//! - `struct` is treated as options
+//! - all fields without a default value are required to be provided
+//! - parsing errors are fatal and will exit the program with a non zero exit code and print the error message to stderr
+//! - In a `struct` the `positional` field is treated specially, it designates positional arguments and must have the field name `positional` and must be a struct.
+//! - `positional` fields should not have an underscore in the name
+//! - The parser supports by default the following types:
+//!      * `bool`
+//!      * integers (`u8` - `u128`, `i8` - `i128`)
+//!      * floats
+//!      * `enum`
+//!      * `[]const u8` and `[:0]const u8`
+//!      * `optional` of the above types
+//! - boolean fields must have a `false` default value. The flag appearing will set it to `true`
+//! - Optional fields are required to have a default value and the default value must be null
+//! - Positional arguments that have no default values cannot follow fields with defaults. Just like in python functions.
+//! - `enum` fields must have atleast 2 possible enum values and must be exhaustive
+//! - If `pub const help` declaration is present, it is used to implement `-h/--help` argument.
+//!
+//! If the flag has a custom type that is not supported with the default parsing options. It is possible to
+//! assign the field a type which has a function named `parseFlagValue` and contains the data you need.
+//! The function must have the following signature:
+//! ```
+//! /// gpa: Allocator to be used by the parseFlagValue function. The user is responsible for managing the lifetime of the memory allocated by the parseFlagValue function.
+//! /// flag_value: The parsed value of command line argument
+//! /// error_out: A pointer to a string describing the error. If the function returns an error this parameter must be set to a string describing the error.
+//! /// FlagType: The type of the flag it is parsing usually @This()
+//! struct {
+//!     pub fn parseFlagValue(gpa: std.mem.Allocator, flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!@This() {}
+//! }
+//! ```
+//!
+//! @IMPORTANT Requrements for this function:
+//! 1. It must return an error if the value is determined to be invalid.
+//! 2. If it returns an error it must set the error_out parameter to a string describing the error. The flag parser
+//! will not free the memory of the string so it is recommended to use a statically allocated string.
+//! 3. If parsed value is returned the error_out paramater must remain null.
+//! 4. If the parseFlagValue function allocates memory it is up to the user to handle the lifetime of the memory.
+//!
+//! Example:
+//! ```zig
+//! const stdx = @import("stdx");
+//! const flags = stdx.flags;
+//!
+//! const CLIArgs = union(enum) {
+//!     init: struct {
+//!         bare: bool = false,
+//!         integer: i32 = 0,
+//!         enum_value: enum { foo, bar } = .foo,
+//!         positional: struct {
+//!             directory: ?[]const u8 = null,
+//!         },
+//!
+//!         pub const help =
+//!             \\Usage: program init [--bare] [--integer=<integer>] [--enum=<foo|bar>] <directory>
+//!             \\
+//!             \\Description
+//!             \\
+//!             \\Options:
+//!             \\  --bare  Creates a bare project without subfolders and tracking files.
+//!             \\  --integer  An integer flag
+//!             \\  --enum  An enum flag
+//!             \\  <directory>  The directory to initialize the project in. Defaults to the current directory.
+//!             \\
+//!          ;
+//!     },
+//!     another: struct {
+//!         foo: struct {
+//!             list: []const []const u8,
+//!
+//!             pub fn parseFlagValue(gpa: std.mem.Allocator, flag_value: []const u8, error_out: *?[]const u8) error{Invalid}!@This() {
+//!                 if (flag_value.len == 0) {
+//!                     error_out.* = "Empty list";
+//!                     return error.Invalid;
+//!                 }
+//!                 const count: usize = std.mem.countScalar(u8, flag_value, ',');
+//!                 var items = std.mem.splitScalar(u8, flag_value, ',');
+//!                 const list = gpa.alloc([]const u8, count + 1) catch {
+//!                     error_out.* = "Failed to allocate list";
+//!                     return error.Invalid;
+//!                 };
+//!                 errdefer gpa.free(tag_list);
+//!
+//!                 for (0..count + 1) |index| {
+//!                     const item = items.next().?;
+//!                     if (item.len == 0) {
+//!                         error_out.* = "Empty item in list";
+//!                         return error.Invalid;
+//!                     }
+//!                     list[index] = item;
+//!                 }
+//!                 return .{ .list = list };
+//!             }
+//!         }
+//!
+//!         pub const help =
+//!             \\Usage: program another --foo="<item1>,<item2>,..."
+//!             \\
+//!             \\Description
+//!             \\
+//!             \\Options:
+//!             \\  --foo  A foo flag with a list of items
+//!             \\
+//!         ;
+//!     },
+//!
+//!
+//!     pub const help =
+//!         \\Usage:
+//!         \\
+//!         \\    program [-h | --help]
+//!         \\
+//!         \\    program init [-h | --help] [--bare] [--integer=<integer>] [--enum=<foo|bar>] <directory>
+//!         \\
+//!         \\    program another [-h | --help] --foo="<item1>,<item2>,..."
+//!         \\
+//!         \\Commands:
+//!         \\    init     Some init command
+//!         \\    another  Another command
+//!         \\
+//!         \\Options:
+//!         \\    -h, --help
+//!         \\        Prints this help message.
+//!         \\
+//!      ;
+//! }
+//!
+//! pub fn main() !void {
+//!     const args = try std.process.argsAlloc(std.heap.page_allocator);
+//!     defer std.process.argsFree(std.heap.page_allocator, args);
+//!
+//!
+//!     const cli_args: CLIArgs = parse_commands(&args, CLIArgs);
+//!     switch (cli_args) {
+//!         .init => |init_args| { ... },
+//!         .something => |something_args| { ... },
+//!     }
+//! }
+//! ```
+//!
+//! @TODO
+//!     - GILA(remove_beast_7qh) Decide if providing an argument multiple times is a good idea
+//!     - GILA(tan_beast_2ag) Add tests
+//!     - GILA(fatherly_axe_dtd) Consider adding true default for booleans and disabling with --no-<flag>
+//!
+//! @REVISION
+//!     0.4 - Added inline assertion instead of using std.debug.assert
+//!     0.3 - Moved to zig 0.16 Args
+//!         - Changed type creations to reflect new system using @Struct instead of @Type
+//!     0.2 - Added allocator to parseFlagValue function definition
+//!     0.1 - Initial version
 
-// @TODO: Add tests
 const std = @import("std");
-const assert = @import("stdx.zig").inlineAssert;
 
-const logFatal = @import("stdx.zig").logFatal;
-
-const log = std.log.scoped(.args_parser);
+const builtin = @import("builtin");
+//https://github.com/ghostty-org/ghostty/blob/26e243a9194f8653e0b44cf00b600629fcee8f46/src/quirks.zig
+pub const assert = switch (builtin.mode) {
+    .Debug => std.debug.assert,
+    .ReleaseFast, .ReleaseSafe, .ReleaseSmall => struct {
+        inline fn assert(cond: bool) void {
+            if (!cond) unreachable;
+        }
+    }.assert,
+};
 
 const MAX_ARGS = 128;
 const flag_parse_function_name = "parseFlagValue";
 
-var local_gpa: std.mem.Allocator = undefined;
+const log = std.log.scoped(.args_parser);
+
+var local_arena: std.mem.Allocator = undefined;
 
 /// Parse CLI arguments for subcommands specified as Zig `struct` or `union(enum)`:
 ///
@@ -160,7 +319,7 @@ pub fn parseArgs(
     io: std.Io,
     /// Allocator used to forward to the parseFlagValue function of the custom types in case they need to allocate memory for their own needs.
     /// The user is responsible for managing the lifetime of the memory allocated by the parseFlagValue function.
-    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
     args: *std.process.Args.Iterator,
     /// The type of the arguments to parse. Must be a struct or union
     comptime ArgType: type,
@@ -169,7 +328,7 @@ pub fn parseArgs(
     assert(args.skip());
     // @NOTE This is the only entry point into parsing the arguments so local_gpa will always be set before
     // any calls to custom parseFlagValue functions.
-    local_gpa = gpa;
+    local_arena = arena;
     return parseFlags(io, args, ArgType);
 }
 
@@ -497,7 +656,7 @@ fn parseFlagValue(comptime Flag: type, flag_name: []const u8, flag_value: [:0]co
         //     will not free the memory of the string so it is recommended to use a statically allocated string.
         //     3. If parsed value is returned the error_out paramater must remain null.
         //     4. If the parseFlagValue function allocates memory it is up to the user to handle the lifetime of the memory.
-        const value = parse_fn(local_gpa, flag_value, &error_out) catch {
+        const value = parse_fn(local_arena, flag_value, &error_out) catch {
             if (error_out) |err_out| {
                 logFatal("Flag '{s}': value '{s}' is not a valid value for type '{s}' to parse: {s}", .{ flag_name, flag_value, @typeName(Value), err_out });
             } else {
@@ -660,3 +819,63 @@ fn defaultValue(comptime field: std.builtin.Type.StructField) ?field.type {
     else
         null;
 }
+
+fn logFatal(comptime format: []const u8, args: anytype) noreturn {
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.ioBasic();
+    var locked_stderr = io.lockStderr(&.{}, null) catch unreachable;
+    var stderr = locked_stderr.terminal();
+    defer io.unlockStderr();
+    stderr.writer.print("FATAL: " ++ format ++ "\n", args) catch {};
+    std.process.exit(1);
+}
+
+// This software is available under two licenses -- choose whichever you
+// prefer.
+//
+// ----------------------------------------------------------------------
+// License 1 -- MIT No Attribution (MIT-0)
+//
+// Copyright (c) 2025 Aditya Rajagopal
+//
+// Permission is hereby granted, free of charge, to any person obtaining
+// a copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to
+// permit persons to whom the Software is furnished to do so.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+// CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+// TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+// SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+// ----------------------------------------------------------------------
+// License 2 -- Unlicense <https://unlicense.org>
+//
+// This is free and unencumbered software released into the public
+// domain.
+//
+// Anyone is free to copy, modify, publish, use, compile, sell, or
+// distribute this software, either in source code form or as a compiled
+// binary, for any purpose, commercial or non-commercial, and by any
+// means.
+//
+// In jurisdictions that recognize copyright laws, the author or authors
+// of this software dedicate any and all copyright interest in the
+// software to the public domain. We make this dedication for the benefit
+// of the public at large and to the detriment of our heirs and
+// successors. We intend this dedication to be an overt act of
+// relinquishment in perpetuity of all present and future rights to this
+// software under copyright law.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+// OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+// ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+// OTHER DEALINGS IN THE SOFTWARE.

@@ -18,22 +18,6 @@ pub const FixedGrowingBufferAllocator = growing_buffer.FixedGrowingBufferAllocat
 pub const BitStream = @import("bitstream.zig");
 pub const png = @import("png.zig");
 
-const root = @import("root");
-/// Stdlib-wide options that can be overridden by the root file.
-pub const options: Options = if (@hasDecl(root, "stdx_options")) root.stdx_options else .default;
-
-pub const Options = struct {
-    /// Internally this function is used when a fatal error occurs and the program should exit.
-    logFatal: fn (comptime format: []const u8, args: anytype) noreturn = logFatal,
-    /// Detailed internal diagnostics for png
-    detailed_diagnostics_png: bool = true,
-
-    pub const default = Options{
-        .logFatal = logFatal,
-        .detailed_diagnostics_png = true,
-    };
-};
-
 pub fn logFatal(comptime format: []const u8, args: anytype) noreturn {
     var threaded = std.Io.Threaded.init_single_threaded;
     const io = threaded.ioBasic();

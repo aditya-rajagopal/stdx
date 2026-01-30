@@ -1,7 +1,39 @@
+//! Basic date time util for UTC time zones.
+//!
+//! ```zig
+//! const dt = @import("date_time_utc.zig").DateTimeUTC;
+//!
+//! const now = dt.now(); // Curret time in UTC
+//! const some_dt = dt.fromString("20220101_010101", .YYYYMMDD_HHMMSS); // Parse a string into a DateTimeUTC
+//!
+//! std.debug.print("Current time is {f}\n", .{now});
+//! // Current time is 2022-01-01T01:01:01.000Z
+//! std.debug.print("Some date time is {f}\n", .{some_dt.as(.YYYYMMDD_HHMMSS)});
+//! // Some date time is 20220101_010101
+//! std.debug.print("Some date time is {f}\n", .{some_dt.as(.@"YYYYMMDD_HHMMSS.fffZ")});
+//! // Some date time is 20220101_010101.000Z
+//! ```
+//!
+//! @TODO
+//!     - GILA(fearless_vortex_srj) Move datetime to new Io interface
+//!
+//! @REVISION
+//!     0.3 - Added inline assertion instead of using std.debug.assert
+//!     0.2 - Added as() function to create a formater for the date_time
+//!     0.1 - Initial version
 const std = @import("std");
-const assert = @import("stdx.zig").inlineAssert;
-
 const builtin = @import("builtin");
+
+//https://github.com/ghostty-org/ghostty/blob/26e243a9194f8653e0b44cf00b600629fcee8f46/src/quirks.zig
+const assert = switch (builtin.mode) {
+    .Debug => std.debug.assert,
+    .ReleaseFast, .ReleaseSafe, .ReleaseSmall => struct {
+        inline fn assert(cond: bool) void {
+            if (!cond) unreachable;
+        }
+    }.assert,
+};
+
 const epoch = std.time.epoch;
 const ns_per_s = std.time.ns_per_s;
 const ns_per_ms = std.time.ns_per_ms;
@@ -308,3 +340,53 @@ test "DateTimeUTC.as" {
     try writer.print("{f}", .{date_time});
     try std.testing.expectEqualStrings("2022-01-01T01:01:01.000Z", writer.buffered());
 }
+
+// This software is available under two licenses -- choose whichever you
+// prefer.
+//
+// ----------------------------------------------------------------------
+// License 1 -- MIT No Attribution (MIT-0)
+//
+// Copyright (c) 2025 Aditya Rajagopal
+//
+// Permission is hereby granted, free of charge, to any person obtaining
+// a copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to
+// permit persons to whom the Software is furnished to do so.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+// CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+// TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+// SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+// ----------------------------------------------------------------------
+// License 2 -- Unlicense <https://unlicense.org>
+//
+// This is free and unencumbered software released into the public
+// domain.
+//
+// Anyone is free to copy, modify, publish, use, compile, sell, or
+// distribute this software, either in source code form or as a compiled
+// binary, for any purpose, commercial or non-commercial, and by any
+// means.
+//
+// In jurisdictions that recognize copyright laws, the author or authors
+// of this software dedicate any and all copyright interest in the
+// software to the public domain. We make this dedication for the benefit
+// of the public at large and to the detriment of our heirs and
+// successors. We intend this dedication to be an overt act of
+// relinquishment in perpetuity of all present and future rights to this
+// software under copyright law.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+// OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+// ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+// OTHER DEALINGS IN THE SOFTWARE.

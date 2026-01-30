@@ -1,11 +1,19 @@
 ///! @TODO[[bowed_path_6n3]]
 const std = @import("std");
-
-const assert = @import("stdx.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
+const builtin = @import("builtin");
 
-const stdx = @import("stdx.zig");
-const enabled_diagnostics = stdx.options.detailed_diagnostics_png;
+//https://github.com/ghostty-org/ghostty/blob/26e243a9194f8653e0b44cf00b600629fcee8f46/src/quirks.zig
+pub const assert = switch (builtin.mode) {
+    .Debug => std.debug.assert,
+    .ReleaseFast, .ReleaseSafe, .ReleaseSmall => struct {
+        inline fn assert(cond: bool) void {
+            if (!cond) unreachable;
+        }
+    }.assert,
+};
+
+const DIAGNOSTICS_ENABLED = true;
 
 pub const MAX_IMAGE_DIM: u32 = 1 << 24;
 
@@ -46,7 +54,7 @@ pub fn fromFile(
     /// Used for allocating intermediate buffers which can safely be discarded after the image has parsed.
     /// This arena should be large enough to hold the raw png data, the deflated image data and 2 scanlines of the image.
     /// Recommendation: expected_width * expected_height * num_channels * 4 bytes.
-    arena: *stdx.Arena,
+    arena: *std.heap.ArenaAllocator,
     /// The allocator used for the final image data. This data must be freed by the user.
     gpa: std.mem.Allocator,
     /// Optional diagnostic string. If not null and stdx_options.detailed_diagnostics_png is true, the parser will add
@@ -71,7 +79,7 @@ pub fn fromMemory(
     /// Used for allocating intermediate buffers which can safely be discarded after the image has parsed.
     /// This arena should be large enough to hold the raw png data, the deflated image data and 2 scanlines of the image.
     /// Recommendation: expected_width * expected_height * num_channels * 4 bytes.
-    arena: *stdx.Arena,
+    arena: *std.heap.ArenaAllocator,
     /// The allocator used for the final image data. This data must be freed by the user.
     gpa: std.mem.Allocator,
     /// Optional diagnostic string. If not null and stdx_options.detailed_diagnostics_png is true, the parser will add
@@ -101,7 +109,7 @@ pub fn parse(
     /// Used for allocating intermediate buffers which can safely be discarded after the image has parsed.
     /// This arena should be large enough to hold the raw png data, the deflated image data and 2 scanlines of the image.
     /// Recommendation: expected_width * expected_height * num_channels * 4 bytes.
-    arena: *stdx.Arena,
+    arena: *std.heap.ArenaAllocator,
     /// The allocator used for the final image data. This data must be freed by the user.
     gpa: std.mem.Allocator,
     /// Optional diagnostic string. If not null and stdx_options.detailed_diagnostics_png is true, the parser will add
@@ -304,7 +312,7 @@ pub fn parse(
 
 inline fn Error(diagnostic: ?*?[]const u8, comptime msg: []const u8) PNGError {
     @branchHint(.cold);
-    if (comptime enabled_diagnostics) {
+    if (comptime DIAGNOSTICS_ENABLED) {
         if (diagnostic) |diag| {
             diag.* = msg;
         }
@@ -381,7 +389,7 @@ const ChunkType = enum(u32) {
     _,
 };
 
-fn parseChunks(reader: *std.Io.Reader, arena: *stdx.Arena, diagnostic: ?*?[]const u8) PNGError!struct { PNGInfo, []u8 } {
+fn parseChunks(reader: *std.Io.Reader, arena: *std.heap.ArenaAllocator, diagnostic: ?*?[]const u8) PNGError!struct { PNGInfo, []u8 } {
     const png_magic = reader.takeInt(u64, .little) catch return Error(diagnostic, "Invalid PNG magic number");
     if (png_magic != PNGHeader) return Error(diagnostic, "PNG magic number mismatch");
 
@@ -642,7 +650,7 @@ const Zlib = struct {
 
     pub const ZlibError = error{InsufficientZlibData};
 
-    pub fn deflate(compressed: []const u8, arena: *stdx.Arena, info: PNGInfo, diagnostic: ?*?[]const u8) PNGError![]const u8 {
+    pub fn deflate(compressed: []const u8, arena: *std.heap.ArenaAllocator, info: PNGInfo, diagnostic: ?*?[]const u8) PNGError![]const u8 {
         var ctx = Zlib{
             .data = compressed,
             .num_bits = 0,
