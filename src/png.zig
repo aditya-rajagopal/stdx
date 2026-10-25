@@ -52,9 +52,10 @@ pub fn fromFile(
     file: std.Io.File,
     io: std.Io,
     /// Used for allocating intermediate buffers which can safely be discarded after the image has parsed.
+    /// Allocations are not individually freed; the caller must reset or deinitialize the backing arena after success or failure.
     /// This arena should be large enough to hold the raw png data, the deflated image data and 2 scanlines of the image.
     /// Recommendation: expected_width * expected_height * num_channels * 4 bytes.
-    arena: *std.heap.ArenaAllocator,
+    arena: Allocator,
     /// The allocator used for the final image data. This data must be freed by the user.
     gpa: std.mem.Allocator,
     /// Optional diagnostic string. If not null and stdx_options.detailed_diagnostics_png is true, the parser will add
@@ -67,7 +68,7 @@ pub fn fromFile(
     comptime {
         assert(BufferSize > 4096);
     }
-    const temp_buffer: []u8 = arena.pushArrayAligned(u8, .fromByteUnits(4096), BufferSize);
+    const temp_buffer = try arena.alignedAlloc(u8, .fromByteUnits(4096), BufferSize);
     var file_reader = file.reader(io, temp_buffer);
     const reader = &file_reader.interface;
     return parse(reader, arena, gpa, diagnostic, config);
@@ -77,9 +78,10 @@ pub fn fromMemory(
     /// The memory that is to be used to stream the PNG file data
     memory: []const u8,
     /// Used for allocating intermediate buffers which can safely be discarded after the image has parsed.
+    /// Allocations are not individually freed; the caller must reset or deinitialize the backing arena after success or failure.
     /// This arena should be large enough to hold the raw png data, the deflated image data and 2 scanlines of the image.
     /// Recommendation: expected_width * expected_height * num_channels * 4 bytes.
-    arena: *std.heap.ArenaAllocator,
+    arena: Allocator,
     /// The allocator used for the final image data. This data must be freed by the user.
     gpa: std.mem.Allocator,
     /// Optional diagnostic string. If not null and stdx_options.detailed_diagnostics_png is true, the parser will add
@@ -107,9 +109,10 @@ pub fn parse(
     /// The reader that is to be used to stream the PNG file data
     reader: *std.Io.Reader,
     /// Used for allocating intermediate buffers which can safely be discarded after the image has parsed.
+    /// Allocations are not individually freed; the caller must reset or deinitialize the backing arena after success or failure.
     /// This arena should be large enough to hold the raw png data, the deflated image data and 2 scanlines of the image.
     /// Recommendation: expected_width * expected_height * num_channels * 4 bytes.
-    arena: *std.heap.ArenaAllocator,
+    arena: Allocator,
     /// The allocator used for the final image data. This data must be freed by the user.
     gpa: std.mem.Allocator,
     /// Optional diagnostic string. If not null and stdx_options.detailed_diagnostics_png is true, the parser will add
@@ -154,7 +157,7 @@ pub fn parse(
         @branchHint(.likely);
         break :blk compressed[0 .. width_bytes * 2];
     } else blk: {
-        break :blk arena.pushArray(u8, width_bytes * 2);
+        break :blk try arena.alloc(u8, width_bytes * 2);
     };
     @memset(filter_buffer, 0);
 
@@ -264,7 +267,7 @@ pub fn parse(
     }
 
     if (comptime config.flip_vertical_on_load) {
-        const temp_buffer = arena.pushPages(1);
+        const temp_buffer = try arena.alloc(u8, std.heap.pageSize());
         for (0..info.height >> 1) |row| {
             var row0 = out_data[row * width_stride ..];
             var row1 = out_data[(info.height - row - 1) * width_stride ..];
@@ -291,24 +294,28 @@ pub fn parse(
     };
 }
 
-// test "readPNG" {
-//     const file = std.Io.Dir.cwd().openFile(std.testing.io, "assets/test.png", .{}) catch unreachable;
-//     defer file.close(std.testing.io);
-//     var diagnostic: ?[]const u8 = null;
-//     var arena = try stdx.Arena.init(std.testing.allocator, 16 * 1024 * 1024, null);
-//     defer arena.deinit(std.testing.allocator);
-//     const io = std.testing.io;
-//     const image = fromFile(file, io, &arena, std.testing.allocator, &diagnostic, .default) catch {
-//         std.debug.print("Error: {s}\n", .{diagnostic.?});
-//         return error.ParseFailed;
-//     };
-//     defer std.testing.allocator.free(image.data);
-//     try std.testing.expectEqual(2, image.width);
-//     try std.testing.expectEqual(2, image.height);
-//     try std.testing.expectEqual(4, image.channels);
-//     const expected_data: []const u8 = &[_]u8{ 0, 0, 255, 255, 255, 0, 255, 255, 255, 255, 255, 255, 255, 0, 0, 255 };
-//     try std.testing.expectEqualSlices(u8, expected_data, image.data);
-// }
+test "read PNG with a scratch allocator" {
+    const io = std.testing.io;
+    const file = try std.Io.Dir.cwd().openFile(io, "assets/test.png", .{});
+    defer file.close(io);
+    try std.testing.expectError(error.OutOfMemory, fromFile(
+        file,
+        io,
+        std.testing.failing_allocator,
+        std.testing.allocator,
+        null,
+        .default,
+    ));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const image = try fromFile(file, io, arena.allocator(), std.testing.allocator, null, .default);
+    defer std.testing.allocator.free(image.data);
+    try std.testing.expectEqual(2, image.width);
+    try std.testing.expectEqual(2, image.height);
+    try std.testing.expectEqual(4, image.channels);
+    const expected_data = [_]u8{ 0, 0, 255, 255, 255, 0, 255, 255, 255, 255, 255, 255, 255, 0, 0, 255 };
+    try std.testing.expectEqualSlices(u8, &expected_data, image.data);
+}
 
 inline fn Error(diagnostic: ?*?[]const u8, comptime msg: []const u8) PNGError {
     @branchHint(.cold);
@@ -389,7 +396,7 @@ const ChunkType = enum(u32) {
     _,
 };
 
-fn parseChunks(reader: *std.Io.Reader, arena: *std.heap.ArenaAllocator, diagnostic: ?*?[]const u8) PNGError!struct { PNGInfo, []u8 } {
+fn parseChunks(reader: *std.Io.Reader, arena: Allocator, diagnostic: ?*?[]const u8) PNGError!struct { PNGInfo, []u8 } {
     const png_magic = reader.takeInt(u64, .little) catch return Error(diagnostic, "Invalid PNG magic number");
     if (png_magic != PNGHeader) return Error(diagnostic, "PNG magic number mismatch");
 
@@ -441,12 +448,10 @@ fn parseChunks(reader: *std.Io.Reader, arena: *std.heap.ArenaAllocator, diagnost
                 if (info.interlace_method == 1) return Error(diagnostic, "Adam7 interlaced images are not supported");
 
                 // NOTE: Trying to reserve some reasonable amount based on some example images. This should always be larger?
-                // NOTE(adi): This is safe because we are using an arena that would have failed to allocate and crashed
-                // if we ran out of memory
-                raw_data = std.ArrayList(u8).initCapacity(
-                    arena.allocator(),
+                raw_data = try std.ArrayList(u8).initCapacity(
+                    arena,
                     (info.width + 1) * info.height * info.num_channels,
-                ) catch unreachable;
+                );
 
                 if (info.bit_depth != 8 or // WARN: Only suuport 8bit format
                     info.interlace_method != 0 or // WARN: Only non-interlaced images
@@ -457,9 +462,7 @@ fn parseChunks(reader: *std.Io.Reader, arena: *std.heap.ArenaAllocator, diagnost
             },
             .IDAT => {
                 if (first_chunk) return Error(diagnostic, "IDAT was the first chunk");
-                // NOTE(adi): This is safe because we are using an arena that would have failed to allocate and crashed
-                // if we ran out of memory
-                raw_data.ensureUnusedCapacity(arena.allocator(), current_chunk_length) catch unreachable;
+                try raw_data.ensureUnusedCapacity(arena, current_chunk_length);
                 const current_length = raw_data.items.len;
                 raw_data.items.len += current_chunk_length;
                 const chunk_buffer = raw_data.items[current_length..][0..current_chunk_length];
@@ -650,7 +653,7 @@ const Zlib = struct {
 
     pub const ZlibError = error{InsufficientZlibData};
 
-    pub fn deflate(compressed: []const u8, arena: *std.heap.ArenaAllocator, info: PNGInfo, diagnostic: ?*?[]const u8) PNGError![]const u8 {
+    pub fn deflate(compressed: []const u8, arena: Allocator, info: PNGInfo, diagnostic: ?*?[]const u8) PNGError![]const u8 {
         var ctx = Zlib{
             .data = compressed,
             .num_bits = 0,
@@ -678,7 +681,7 @@ const Zlib = struct {
         const bytes_per_row = (info.width * info.bit_depth + 7) >> 3;
         // NOTE: The first byte of every column is the filter type hence the + info.height
         const size_estimate = bytes_per_row * info.height * info.num_channels + info.height;
-        const deflated_buffer = arena.pushArray(u8, size_estimate);
+        const deflated_buffer = try arena.alloc(u8, size_estimate);
         var deflated = std.ArrayList(u8).initBuffer(deflated_buffer);
 
         decompression_loop: while (is_final_block == 0) {
@@ -919,3 +922,53 @@ pub const ZlibBlockType = enum(u8) {
     dynamic_huffman = 2,
     invalid_reserved = 3,
 };
+
+// This software is available under two licenses -- choose whichever you
+// prefer.
+//
+// ----------------------------------------------------------------------
+// License 1 -- MIT No Attribution (MIT-0)
+//
+// Copyright (c) 2025 Aditya Rajagopal
+//
+// Permission is hereby granted, free of charge, to any person obtaining
+// a copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to
+// permit persons to whom the Software is furnished to do so.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+// CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+// TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+// SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+// ----------------------------------------------------------------------
+// License 2 -- Unlicense <https://unlicense.org>
+//
+// This is free and unencumbered software released into the public
+// domain.
+//
+// Anyone is free to copy, modify, publish, use, compile, sell, or
+// distribute this software, either in source code form or as a compiled
+// binary, for any purpose, commercial or non-commercial, and by any
+// means.
+//
+// In jurisdictions that recognize copyright laws, the author or authors
+// of this software dedicate any and all copyright interest in the
+// software to the public domain. We make this dedication for the benefit
+// of the public at large and to the detriment of our heirs and
+// successors. We intend this dedication to be an overt act of
+// relinquishment in perpetuity of all present and future rights to this
+// software under copyright law.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+// OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+// ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+// OTHER DEALINGS IN THE SOFTWARE.

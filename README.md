@@ -234,19 +234,21 @@ const std = @import("std");
 const stdx = @import("stdx");
 const png = stdx.png;
 
-pub fn main() !void {
-    const file = std.fs.cwd().openFile("assets/test.png", .{}) catch unreachable;
-    defer file.close();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const file = try std.Io.Dir.cwd().openFile(io, "assets/test.png", .{});
+    defer file.close(io);
     var diagnostic: ?[]const u8 = null;
     // Allocate some reasonable amount of memory for the image parser to use to store
     // the raw data and the uncompressed image data before filtering and converting to RGBA.
     // A decent rule of thumb is to have atleast 4 * width * height * channels bytes of memory for the arena.
-    var arena = try stdx.Arena.init(std.heap.page_allocator, 16 * 1024 * 1024, null);
-    defer arena.deinit(std.heap.page_allocator);
-    // The actual image data is stored in the General Purpose Array List (GPA) allocator and not on the arena.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    // Scratch allocations are reclaimed when the arena is reset or deinitialized, including on failure.
+    // The actual image data is stored using the separate output allocator.
     // This makes the arena safe to reuse and/or deallocate after the image is parsed.
-    const image = png.parseFile(file, &arena, std.heap.page_allocator, &diagnostic, .default) catch |err| {
-        std.log.err("ERROR: PNG parsing failed: {s}", .{diagnostic.?});
+    const image = png.fromFile(file, io, arena.allocator(), std.heap.page_allocator, &diagnostic, .default) catch |err| {
+        std.log.err("ERROR: PNG parsing failed: {s} ({t})", .{ diagnostic orelse "No diagnostic available", err });
         return err;
     };
     defer std.heap.page_allocator.free(image.data);
