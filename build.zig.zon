@@ -2,7 +2,7 @@
     .name = .stdx,
     .version = "0.0.0",
     .fingerprint = 0x5479474f61c44124, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0-dev.2261+d6b3dd25a",
+    .minimum_zig_version = "0.18.0-dev.362+705a6b4ef",
     .dependencies = .{},
     .paths = .{
         "build.zig",

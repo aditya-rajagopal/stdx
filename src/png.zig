@@ -5,8 +5,8 @@ const builtin = @import("builtin");
 
 //https://github.com/ghostty-org/ghostty/blob/26e243a9194f8653e0b44cf00b600629fcee8f46/src/quirks.zig
 pub const assert = switch (builtin.mode) {
-    .Debug => std.debug.assert,
-    .ReleaseFast, .ReleaseSafe, .ReleaseSmall => struct {
+    .debug => std.debug.assert,
+    .fast, .safe, .small => struct {
         inline fn assert(cond: bool) void {
             if (!cond) unreachable;
         }
@@ -170,7 +170,7 @@ pub fn parse(
 
             // INFO: from stb_image: for the first scanline it is useful to redeine the filter type based on what the
             // filtering alogrithm transforms into assuming the previous scanline is all 0s
-            const filter_type: FilterTypes = if (i == 0) first_filter_map[deflated[0]] else @enumFromInt(deflated[0]);
+            const filter_type: FilterTypes = if (i == 0) first_filter_map[deflated[0]] else @fromBackingInt(@intCast(deflated[0]));
             deflated = deflated[1..];
 
             switch (filter_type) {
@@ -427,7 +427,7 @@ fn parseChunks(reader: *std.Io.Reader, arena: *std.heap.ArenaAllocator, diagnost
                 const colour_type = reader.takeInt(u8, .little) catch return Error(diagnostic, "Cound not read IHDR colour type");
                 if (colour_type > 6) return Error(diagnostic, "Invalid colour type");
 
-                info.colour_type = @enumFromInt(colour_type);
+                info.colour_type = @fromBackingInt(@intCast(colour_type));
                 if (info.colour_type == .plte) return Error(diagnostic, "TODO: Paletted images are not supported");
                 info.num_channels = info.colour_type.get_num_channels();
 
@@ -509,11 +509,11 @@ const FilterTypes = enum(u8) {
 };
 
 const default_length_sizes: [HuffmanTree.NUM_SYMBOLS]u8 =
-    [_]u8{8} ** (144) ++
-    [_]u8{9} ** (256 - 144) ++
-    [_]u8{7} ** (280 - 256) ++
-    [_]u8{8} ** (288 - 280);
-const default_distances_sizes: [32]u8 = [_]u8{5} ** 32;
+    @as([144]u8, @splat(8)) ++
+    @as([256 - 144]u8, @splat(9)) ++
+    @as([280 - 256]u8, @splat(7)) ++
+    @as([288 - 280]u8, @splat(8));
+const default_distances_sizes: [32]u8 = @splat(5);
 
 const default_length_huffman = blk: {
     @setEvalBranchQuota(100000);
@@ -581,7 +581,7 @@ const HuffmanTree = struct {
     pub fn init(self: *HuffmanTree, sizes: []const u8) HuffmanTreeError!void {
         // 1. Create a list that counts the frequency of each bit length that represents a symbol
         // 1 to 16 + 0 = 17
-        var size_counts: [17]u16 = [_]u16{0} ** 17;
+        var size_counts: [17]u16 = @splat(0);
         for (sizes) |s| {
             size_counts[s] += 1;
         }
@@ -683,7 +683,7 @@ const Zlib = struct {
 
         decompression_loop: while (is_final_block == 0) {
             is_final_block = try ctx.consume(1);
-            const block_type: ZlibBlockType = @enumFromInt(try ctx.consume(2));
+            const block_type: ZlibBlockType = @fromBackingInt(@intCast(try ctx.consume(2)));
             switch (block_type) {
                 .uncompressed => {
                     _ = try ctx.consume(5);

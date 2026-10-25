@@ -7,8 +7,8 @@ const builtin = @import("builtin");
 
 //https://github.com/ghostty-org/ghostty/blob/26e243a9194f8653e0b44cf00b600629fcee8f46/src/quirks.zig
 pub const assert = switch (builtin.mode) {
-    .Debug => std.debug.assert,
-    .ReleaseFast, .ReleaseSafe, .ReleaseSmall => struct {
+    .debug => std.debug.assert,
+    .fast, .safe, .small => struct {
         inline fn assert(cond: bool) void {
             if (!cond) unreachable;
         }
@@ -119,7 +119,7 @@ pub fn encode(allocator: std.mem.Allocator, wav_data: WavData) std.mem.Allocator
         @sizeOf(FormatChunk) + @sizeOf(ChunkHeader) + data_len;
     const result = try allocator.alloc(u8, total_size);
 
-    var builder = std.ArrayListUnmanaged(u8).initBuffer(result);
+    var builder = std.ArrayList(u8).initBuffer(result);
     builder.appendSliceAssumeCapacity(std.mem.asBytes(&MasterRIFFChunk.block_id.toInt()));
     builder.appendSliceAssumeCapacity(std.mem.asBytes(&total_size));
     builder.appendSliceAssumeCapacity(std.mem.asBytes(&MasterRIFFChunk.format_id.toInt()));
@@ -128,7 +128,7 @@ pub fn encode(allocator: std.mem.Allocator, wav_data: WavData) std.mem.Allocator
     const format_chunk_size: u32 = @sizeOf(FormatChunk);
     builder.appendSliceAssumeCapacity(std.mem.asBytes(&format_chunk_size));
 
-    const audio_format: u16 = @intFromEnum(wav_data.format.audio_format);
+    const audio_format: u16 = @backingInt(wav_data.format.audio_format);
     builder.appendSliceAssumeCapacity(std.mem.asBytes(&audio_format));
     builder.appendSliceAssumeCapacity(std.mem.asBytes(&wav_data.format.num_channels));
     builder.appendSliceAssumeCapacity(std.mem.asBytes(&wav_data.format.frequency));
@@ -198,7 +198,10 @@ test "wav decode" {
 
     const wav_data_encoded = try encode(std.testing.allocator, wav_data_decoded);
     defer std.testing.allocator.free(wav_data_encoded);
-    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = "test_out.wav", .data = wav_data_encoded, .flags = .{} });
+    const roundtrip = try decode(std.testing.allocator, wav_data_encoded);
+    defer std.testing.allocator.free(roundtrip.data);
+    try std.testing.expectEqualDeep(wav_data_decoded.format, roundtrip.format);
+    try std.testing.expectEqualSlices(u8, wav_data_decoded.data, roundtrip.data);
 }
 
 // This software is available under two licenses -- choose whichever you

@@ -4,8 +4,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 //https://github.com/ghostty-org/ghostty/blob/26e243a9194f8653e0b44cf00b600629fcee8f46/src/quirks.zig
 pub const assert = switch (builtin.mode) {
-    .Debug => std.debug.assert,
-    .ReleaseFast, .ReleaseSafe, .ReleaseSmall => struct {
+    .debug => std.debug.assert,
+    .fast, .safe, .small => struct {
         inline fn assert(cond: bool) void {
             if (!cond) unreachable;
         }
@@ -13,41 +13,42 @@ pub const assert = switch (builtin.mode) {
 };
 
 pub fn GrowingBuffer(comptime E: type) type {
-    const page_size = std.heap.page_size_min;
     const alignment_bytes = std.heap.page_size_min;
 
+    if (@sizeOf(E) == 0) @compileError("GrowingBuffer requires a non-zero-sized element type");
     if (alignment_bytes % @alignOf(E) != 0) {
-        const msg = std.fmt.comptimePrint("Alignemnt of type {s} does not evenly divide page_size_min: {} has alignment {}", .{ @typeName(E), page_size, @alignOf(E) });
-        @compileError(msg);
-    }
-    if (page_size % @sizeOf(E) != 0) {
-        const msg = std.fmt.comptimePrint("Type {s} does not evenly divide page_size_min: {} has size {}", .{ @typeName(E), page_size, @sizeOf(E) });
+        const msg = std.fmt.comptimePrint(
+            "Alignment of type {s} exceeds page_size_min: {} has alignment {}",
+            .{ @typeName(E), alignment_bytes, @alignOf(E) },
+        );
         @compileError(msg);
     }
 
     return struct {
         const Buffer = @This();
 
-        reserved_pages: []align(std.heap.page_size_min) E,
-        max_elements_count: usize,
+        /// Complete elements in the committed prefix. Growth does not move them.
+        reserved_pages: []align(alignment_bytes) E,
+        /// Capacity rounded to whole OS pages, including extra complete elements
+        /// but excluding the permanent trailing guard page.
+        max_elements_count: u64,
 
         pub const empty = Buffer{
             .reserved_pages = &.{},
             .max_elements_count = 0,
         };
 
-        pub fn init(max_elements: usize) error{ReserveFailed}!Buffer {
-            const max_size_bytes = max_elements * @sizeOf(E);
-            const max_pages = @divFloor(max_size_bytes, page_size) + 1;
-            const actual_max_elements = @divExact(max_pages * page_size, @sizeOf(E));
-
-            var buffer: Buffer = undefined;
-            buffer.max_elements_count = actual_max_elements;
-            try buffer.reserve(max_pages);
+        pub fn init(max_elements: u64) error{ReserveFailed}!Buffer {
+            if (max_elements == 0) return .empty;
+            const usable_bytes = pageAlignedBytes(max_elements) catch return error.ReserveFailed;
+            const reserved_bytes = try reservationBytes(usable_bytes);
+            var buffer: Buffer = .empty;
+            buffer.max_elements_count = @divFloor(usable_bytes, @sizeOf(E));
+            try buffer.reserve(reserved_bytes);
             return buffer;
         }
 
-        pub fn initCapacity(max_elements: usize, initial_capacity_elements: usize) error{ OutOfMemory, ReserveFailed }!Buffer {
+        pub fn initCapacity(max_elements: u64, initial_capacity_elements: u64) error{ OutOfMemory, ReserveFailed }!Buffer {
             var buffer: Buffer = try .init(max_elements);
             errdefer buffer.deinit();
             try buffer.ensureTotalCapacity(initial_capacity_elements);
@@ -55,80 +56,114 @@ pub fn GrowingBuffer(comptime E: type) type {
         }
 
         pub fn deinit(self: *Buffer) void {
-            self.reserved_pages.len = self.max_elements_count;
-            const bytes: []align(alignment_bytes) u8 = std.mem.sliceAsBytes(self.reserved_pages);
-            switch (builtin.os.tag) {
-                .windows => VirtualFree(@ptrCast(bytes.ptr), bytes.len, .{ .RELEASE = true }),
-                else => std.posix.munmap(bytes),
-            }
-        }
-
-        fn reserve(self: *Buffer, pages: usize) !void {
+            if (self.max_elements_count == 0) return;
+            const usable_bytes = pageAlignedBytes(self.max_elements_count) catch unreachable;
+            const reserved_bytes = reservationBytes(usable_bytes) catch unreachable;
+            const ptr: [*]align(alignment_bytes) u8 = @ptrCast(self.reserved_pages.ptr);
             switch (builtin.os.tag) {
                 .windows => {
-                    const ptr = try VirtualAlloc(
+                    const released = VirtualFree(@ptrCast(ptr), 0, .{ .RELEASE = true });
+                    assert(released != 0);
+                },
+                else => std.posix.munmap(ptr[0..@intCast(reserved_bytes)]),
+            }
+            self.* = .empty;
+        }
+
+        fn reserve(self: *Buffer, reserved_bytes: u64) error{ReserveFailed}!void {
+            // Includes one trailing page that growth must never make accessible.
+            // reservationBytes has already checked the native address-space limit.
+            switch (builtin.os.tag) {
+                .windows => {
+                    const ptr = VirtualAlloc(
                         null,
-                        pages * page_size,
+                        @intCast(reserved_bytes),
                         .{ .RESERVE = true },
                         .{ .READWRITE = true },
                     ) orelse return error.ReserveFailed;
-                    self.reserved_pages = @as([*]align(alignment_bytes) E, @ptrCast(@alignCast(ptr)))[0..self.max_elements_count];
-                    self.reserved_pages.len = 0;
+                    self.reserved_pages = @as([*]align(alignment_bytes) E, @ptrCast(@alignCast(ptr)))[0..0];
                 },
                 else => {
                     const bytes = std.posix.mmap(
                         null,
-                        pages * page_size,
+                        @intCast(reserved_bytes),
                         .{}, // PROT.NONE
                         .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
                         -1,
                         0,
                     ) catch return error.ReserveFailed;
-                    self.reserved_pages = @as([*]align(alignment_bytes) E, @ptrCast(@alignCast(bytes)))[0..self.max_elements_count];
-                    self.reserved_pages.len = 0;
+                    self.reserved_pages = @as([*]align(alignment_bytes) E, @ptrCast(bytes.ptr))[0..0];
                 },
             }
         }
 
-        pub fn ensureTotalCapacity(self: *Buffer, capacity: usize) error{OutOfMemory}!void {
+        pub fn ensureTotalCapacity(self: *Buffer, capacity: u64) error{OutOfMemory}!void {
             if (capacity <= self.reserved_pages.len) return;
             if (capacity > self.max_elements_count) {
                 return error.OutOfMemory;
             }
-            const increment = capacity - self.reserved_pages.len;
-            try self.commitNewPages(increment);
+            try self.commitNewPages(capacity, commitPages);
         }
 
-        fn commitNewPages(self: *Buffer, num_elements: usize) error{OutOfMemory}!void {
-            assert(self.reserved_pages.len + num_elements <= self.max_elements_count);
+        // The OS operation is supplied at comptime to exercise commit failure
+        // without exhausting process memory or changing the allocator's layout.
+        fn commitNewPages(
+            self: *Buffer,
+            capacity: u64,
+            comptime commit: fn ([]align(alignment_bytes) u8) error{OutOfMemory}!void,
+        ) error{OutOfMemory}!void {
+            assert(capacity > self.reserved_pages.len);
+            assert(capacity <= self.max_elements_count);
+            const committed_bytes = try pageAlignedBytes(capacity);
+            // NOTE(adi): These calculations cannot fail hence catch unreachable.
+            const previous_bytes = pageAlignedBytes(self.reserved_pages.len) catch unreachable;
+            const reserved_bytes = pageAlignedBytes(self.max_elements_count) catch unreachable;
+            assert(committed_bytes > previous_bytes);
+            assert(committed_bytes <= reserved_bytes);
+            const bytes: [*]align(alignment_bytes) u8 = @ptrCast(self.reserved_pages.ptr);
+            const start_offset: usize = @intCast(previous_bytes);
+            const end_offset: usize = @intCast(committed_bytes);
+            const memory: []align(alignment_bytes) u8 = @alignCast(bytes[start_offset..end_offset]);
+            try commit(memory);
+            self.reserved_pages.len = @intCast(@divFloor(committed_bytes, @sizeOf(E)));
+        }
 
-            const num_bytes = required_bytes(num_elements);
-            const new_pages = @divFloor(num_bytes, page_size) + 1;
-
-            const bytes = @as([*]align(alignment_bytes) u8, @ptrCast(@alignCast(self.reserved_pages.ptr)));
-
-            const start_offset = self.reserved_pages.len * @sizeOf(E);
-            const num_bytes_to_commit = new_pages * page_size;
-            self.reserved_pages.len += @divExact(num_bytes_to_commit, @sizeOf(E));
-
+        fn commitPages(memory: []align(alignment_bytes) u8) error{OutOfMemory}!void {
             switch (builtin.os.tag) {
                 .windows => {
-                    _ = try VirtualAlloc(
-                        @ptrCast(@alignCast(bytes)),
-                        num_bytes_to_commit,
-                        .{ .RESERVE = true, .COMMIT = true },
+                    const ptr = VirtualAlloc(
+                        @ptrCast(memory.ptr),
+                        memory.len,
+                        .{ .COMMIT = true },
                         .{ .READWRITE = true },
                     ) orelse return error.OutOfMemory;
+                    assert(ptr == @as(*anyopaque, @ptrCast(memory.ptr)));
                 },
                 else => {
-                    const memory: []align(std.heap.page_size_min) u8 = @alignCast(bytes[start_offset..][0..num_bytes_to_commit]);
                     std.process.protectMemory(memory, .{ .read = true, .write = true }) catch return error.OutOfMemory;
                 },
             }
         }
 
-        inline fn required_bytes(num_elements: usize) usize {
-            return num_elements * @sizeOf(E);
+        // Each extent is a page-rounded whole-element request. Rounding its
+        // complete-element count back to pages recovers that same extent, even
+        // when the element size does not divide the page size.
+        fn pageAlignedBytes(elements_count: u64) error{OutOfMemory}!u64 {
+            const num_bytes = std.math.mul(u64, elements_count, @sizeOf(E)) catch return error.OutOfMemory;
+            const page_size: u64 = std.heap.pageSize();
+            const padded = std.math.add(u64, num_bytes, page_size - 1) catch return error.OutOfMemory;
+            const aligned = std.mem.alignBackward(u64, padded, page_size);
+            if (aligned > std.math.maxInt(usize)) return error.OutOfMemory;
+            return aligned;
+        }
+
+        fn reservationBytes(usable_bytes: u64) error{ReserveFailed}!u64 {
+            const page_size: u64 = std.heap.pageSize();
+            assert(usable_bytes > 0);
+            assert(usable_bytes % page_size == 0);
+            const reserved_bytes = std.math.add(u64, usable_bytes, page_size) catch return error.ReserveFailed;
+            if (reserved_bytes > std.math.maxInt(usize)) return error.ReserveFailed;
+            return reserved_bytes;
         }
     };
 }
@@ -145,14 +180,14 @@ pub const FixedGrowingBufferAllocator = struct {
         .end_index = 0,
     };
 
-    pub fn init(max_capacity: usize) error{ReserveFailed}!Self {
+    pub fn init(max_capacity: u64) error{ReserveFailed}!Self {
         return .{
             .buffer = try Buffer.init(max_capacity),
             .end_index = 0,
         };
     }
 
-    pub fn initCapacity(max_capacity: usize, initial_size_bytes: usize) error{ OutOfMemory, ReserveFailed }!Self {
+    pub fn initCapacity(max_capacity: u64, initial_size_bytes: u64) error{ OutOfMemory, ReserveFailed }!Self {
         return .{
             .buffer = try Buffer.initCapacity(max_capacity, initial_size_bytes),
             .end_index = 0,
@@ -161,6 +196,7 @@ pub const FixedGrowingBufferAllocator = struct {
 
     pub fn deinit(self: *Self) void {
         self.buffer.deinit();
+        self.* = .empty;
     }
 
     /// Using this at the same time as the interface returned by `threadSafeAllocator` is not thread safe.
@@ -176,7 +212,8 @@ pub const FixedGrowingBufferAllocator = struct {
         };
     }
 
-    /// Provides a lock free thread safe `Allocator` interface to the underlying `FixedBufferAllocator`
+    /// The bump cursor is atomic, but capacity growth is not synchronized.
+    /// Concurrent use requires sufficient capacity to be committed beforehand.
     ///
     /// Using this at the same time as the interface returned by `allocator` is not thread safe.
     pub fn threadSafeAllocator(self: *Self) std.mem.Allocator {
@@ -212,13 +249,13 @@ pub const FixedGrowingBufferAllocator = struct {
         _ = ra;
         const ptr_align = alignment.toByteUnits();
         const adjust_off = std.mem.alignPointerOffset(self.buffer.reserved_pages.ptr + self.end_index, ptr_align) orelse return null;
-        const adjusted_index = self.end_index + adjust_off;
-        const new_end_index = adjusted_index + n;
+        const adjusted_index = std.math.add(u64, self.end_index, adjust_off) catch return null;
+        const new_end_index = std.math.add(u64, adjusted_index, n) catch return null;
         if (new_end_index > self.buffer.reserved_pages.len) {
             self.buffer.ensureTotalCapacity(new_end_index) catch return null;
         }
-        self.end_index = new_end_index;
-        return self.buffer.reserved_pages.ptr + adjusted_index;
+        self.end_index = @intCast(new_end_index);
+        return self.buffer.reserved_pages.ptr + @as(usize, @intCast(adjusted_index));
     }
 
     pub fn resize(
@@ -244,11 +281,12 @@ pub const FixedGrowingBufferAllocator = struct {
             return true;
         }
 
-        const add = new_size - buf.len;
-        if (add + self.end_index > self.buffer.reserved_pages.len) {
-            self.buffer.ensureTotalCapacity(add + self.end_index) catch return false;
+        const add: u64 = new_size - buf.len;
+        const new_end_index = std.math.add(u64, self.end_index, add) catch return false;
+        if (new_end_index > self.buffer.reserved_pages.len) {
+            self.buffer.ensureTotalCapacity(new_end_index) catch return false;
         }
-        self.end_index += add;
+        self.end_index = @intCast(new_end_index);
         return true;
     }
 
@@ -285,13 +323,13 @@ pub const FixedGrowingBufferAllocator = struct {
         var end_index = @atomicLoad(usize, &self.end_index, .seq_cst);
         while (true) {
             const adjust_off = std.mem.alignPointerOffset(self.buffer.reserved_pages.ptr + end_index, ptr_align) orelse return null;
-            const adjusted_index = end_index + adjust_off;
-            const new_end_index = adjusted_index + n;
+            const adjusted_index = std.math.add(u64, end_index, adjust_off) catch return null;
+            const new_end_index = std.math.add(u64, adjusted_index, n) catch return null;
             if (new_end_index > self.buffer.reserved_pages.len) {
                 self.buffer.ensureTotalCapacity(new_end_index) catch return null;
             }
-            end_index = @cmpxchgWeak(usize, &self.end_index, end_index, new_end_index, .seq_cst, .seq_cst) orelse
-                return self.buffer.reserved_pages[adjusted_index..new_end_index].ptr;
+            end_index = @cmpxchgWeak(usize, &self.end_index, end_index, @intCast(new_end_index), .seq_cst, .seq_cst) orelse
+                return self.buffer.reserved_pages.ptr + @as(usize, @intCast(adjusted_index));
         }
     }
 
@@ -418,17 +456,18 @@ pub const MEM = struct {
             ImageMachine,
             _,
 
-            pub const Max: @typeInfo(@This()).@"enum".tag_type = @typeInfo(@This()).@"enum".fields.len;
+            pub const Max: @typeInfo(@This()).@"enum".tag_type = @typeInfo(@This()).@"enum".field_names.len;
         };
     };
 };
 
-pub extern "kernel32" fn VirtualAlloc(lpAddress: ?*anyopaque, dwSize: usize, flAllocationType: MEM.ALLOCATE, flProtect: PROTECTION) callconv(.winapi) ?*anyopaque;
-pub extern "kernel32" fn VirtualFree(lpAddress: ?*anyopaque, dwSize: usize, dwFreeType: MEM.FREE) callconv(.winapi) c_int;
+pub extern "kernel32" fn VirtualAlloc(lpAddress: ?*anyopaque, dwSize: SIZE_T, flAllocationType: MEM.ALLOCATE, flProtect: PROTECTION) callconv(.winapi) ?*anyopaque;
+pub extern "kernel32" fn VirtualFree(lpAddress: ?*anyopaque, dwSize: SIZE_T, dwFreeType: MEM.FREE) callconv(.winapi) c_int;
 
 test FixedGrowingBufferAllocator {
-    const fba = try FixedGrowingBufferAllocator.init(64 * std.heap.page_size_min);
+    const fba = try FixedGrowingBufferAllocator.init(64 * std.heap.pageSize());
     var fixed_buffer_allocator = std.mem.validationWrap(fba);
+    defer fixed_buffer_allocator.underlying_allocator.deinit();
     const a = fixed_buffer_allocator.allocator();
 
     try std.heap.testAllocator(a);
@@ -437,53 +476,249 @@ test FixedGrowingBufferAllocator {
     try std.heap.testAllocatorAlignedShrink(a);
 }
 
-test "GrowingBuffer init/deinit" {
-    const GB = GrowingBuffer(u64);
-    var gb = try GB.init(100);
-    defer gb.deinit();
+test "GrowingBuffer lazy and initial capacity round to whole pages" {
+    var lazy = try GrowingBuffer(u64).init(100);
+    defer lazy.deinit();
+    try std.testing.expectEqual(@as(usize, 0), lazy.reserved_pages.len);
 
-    try std.testing.expect(gb.reserved_pages.len == 0);
+    const elements_per_page = @divExact(std.heap.pageSize(), @sizeOf(u64));
+    for ([_]u64{ 0, 64 }) |initial_capacity| {
+        var gb = try GrowingBuffer(u64).initCapacity(100, initial_capacity);
+        defer gb.deinit();
+        try std.testing.expectEqual(elements_per_page, gb.max_elements_count);
+        try std.testing.expectEqual(if (initial_capacity == 0) @as(usize, 0) else elements_per_page, gb.reserved_pages.len);
+        try std.testing.expectError(error.OutOfMemory, gb.ensureTotalCapacity(gb.max_elements_count + 1));
+
+        try gb.ensureTotalCapacity(50);
+        try std.testing.expectEqual(elements_per_page, gb.reserved_pages.len);
+        try gb.ensureTotalCapacity(100);
+        try std.testing.expectEqual(elements_per_page, gb.reserved_pages.len);
+    }
 }
 
-test "GrowingBuffer initCapacity" {
-    const GB = GrowingBuffer(u64);
-    const initial_bytes = 64;
-    var gb = try GB.initCapacity(100, initial_bytes);
+test "GrowingBuffer page boundaries preserve contents and respect reservation" {
+    const page_size = std.heap.pageSize();
+    var gb = try GrowingBuffer(u8).init(3 * page_size);
     defer gb.deinit();
+    const base = gb.reserved_pages.ptr;
+    try std.testing.expectEqual(3 * page_size, gb.max_elements_count);
 
-    try std.testing.expectEqual(std.heap.page_size_min / @sizeOf(u64), gb.reserved_pages.len);
+    const cases = [_]struct { requested: usize, expected: usize }{
+        .{ .requested = page_size - 1, .expected = page_size },
+        .{ .requested = page_size, .expected = page_size },
+        .{ .requested = page_size + 1, .expected = 2 * page_size },
+        .{ .requested = 2 * page_size, .expected = 2 * page_size },
+        .{ .requested = 3 * page_size, .expected = 3 * page_size },
+    };
+    for (cases) |case| {
+        const previous_capacity = gb.reserved_pages.len;
+        try gb.ensureTotalCapacity(case.requested);
+        try std.testing.expectEqual(case.expected, gb.reserved_pages.len);
+        try std.testing.expectEqual(base, gb.reserved_pages.ptr);
+        for (gb.reserved_pages[0..previous_capacity]) |byte| {
+            try std.testing.expectEqual(@as(u8, 0xa5), byte);
+        }
+        @memset(gb.reserved_pages[previous_capacity..], 0xa5);
+    }
+    try std.testing.expectError(error.OutOfMemory, gb.ensureTotalCapacity(3 * page_size + 1));
+    try std.testing.expectEqual(3 * page_size, gb.reserved_pages.len);
 }
 
-test "GrowingBuffer ensureTotalCapacity within max" {
-    const GB = GrowingBuffer(u64);
-    var gb = try GB.init(100);
+test "GrowingBuffer zero capacity stays empty" {
+    var gb = try GrowingBuffer(u8).init(0);
     defer gb.deinit();
-
-    try gb.ensureTotalCapacity(50);
-    try std.testing.expectEqual(std.heap.page_size_min / @sizeOf(u64), gb.reserved_pages.len);
-    try gb.ensureTotalCapacity(100);
-    try std.testing.expectEqual(std.heap.page_size_min / @sizeOf(u64), gb.reserved_pages.len);
+    try std.testing.expectEqual(@as(u64, 0), gb.max_elements_count);
+    try gb.ensureTotalCapacity(0);
+    try std.testing.expectError(error.OutOfMemory, gb.ensureTotalCapacity(1));
+    try std.testing.expectError(error.OutOfMemory, gb.ensureTotalCapacity(std.math.maxInt(u64)));
+    try std.testing.expectEqual(@as(usize, 0), gb.reserved_pages.len);
 }
 
-test "GrowingBuffer ensureTotalCapacity beyond max" {
-    const GB = GrowingBuffer(u64);
-    var gb = try GB.init(100);
+test "GrowingBuffer trailing guard stays inaccessible through full growth" {
+    const memory = @import("growing_buffer_test_memory.zig");
+    const page_size: u64 = std.heap.pageSize();
+    inline for (.{ u8, [3]u64, [std.heap.page_size_max + 1]u8 }) |E| {
+        // Each request below occupies two elements or two pages, whichever is larger.
+        const requested: u64 = @max(2, @divFloor(2 * page_size, @sizeOf(E)));
+        const usable_bytes = std.mem.alignForward(u64, requested * @sizeOf(E), page_size);
+        var gb = try GrowingBuffer(E).init(requested);
+        defer gb.deinit();
+        const base: u64 = @intFromPtr(gb.reserved_pages.ptr);
+        const guard = base + usable_bytes;
+        try std.testing.expectEqual(@divFloor(usable_bytes, @sizeOf(E)), gb.max_elements_count);
+        try memory.expectInaccessiblePage(std.testing.io, guard);
+        try gb.ensureTotalCapacity(1);
+        try memory.expectInaccessiblePage(std.testing.io, guard);
+        try gb.ensureTotalCapacity(gb.max_elements_count);
+        const bytes = std.mem.sliceAsBytes(gb.reserved_pages);
+        bytes[bytes.len - 1] = 0xa5;
+        try std.testing.expectEqual(@as(u8, 0xa5), bytes[bytes.len - 1]);
+        try std.testing.expectError(error.OutOfMemory, gb.ensureTotalCapacity(gb.max_elements_count + 1));
+        try memory.expectInaccessiblePage(std.testing.io, guard);
+        gb.deinit();
+        try memory.expectUnmapped(std.testing.io, base);
+        try memory.expectUnmapped(std.testing.io, guard);
+    }
+}
+
+test "GrowingBuffer guard reservation rejects arithmetic and native address overflow" {
+    const page_size: u64 = std.heap.pageSize();
+    const largest_native_extent = std.mem.alignBackward(u64, std.math.maxInt(usize), page_size);
+    const largest_u64_extent = std.mem.alignBackward(u64, std.math.maxInt(u64), page_size);
+    const Buffer = GrowingBuffer(u8);
+    // Test sizing directly so rejection cannot be masked by an OS allocation failure.
+    try std.testing.expectEqual(2 * page_size, try Buffer.reservationBytes(page_size));
+    try std.testing.expectEqual(largest_native_extent, try Buffer.reservationBytes(largest_native_extent - page_size));
+    try std.testing.expectError(error.ReserveFailed, Buffer.reservationBytes(largest_native_extent));
+    try std.testing.expectError(error.ReserveFailed, Buffer.reservationBytes(largest_u64_extent));
+    try std.testing.expectError(error.ReserveFailed, Buffer.init(largest_native_extent));
+}
+
+test "GrowingBuffer rejects reservation arithmetic and native address overflow" {
+    // Element multiplication and page rounding must each reject overflow.
+    try std.testing.expectError(error.ReserveFailed, GrowingBuffer(u64).init(std.math.maxInt(u64)));
+    try std.testing.expectError(error.ReserveFailed, GrowingBuffer(u8).init(std.math.maxInt(u64)));
+
+    if (@bitSizeOf(usize) < 64) {
+        const too_large: u64 = @as(u64, std.math.maxInt(usize)) + 1;
+        try std.testing.expectError(error.ReserveFailed, GrowingBuffer(u8).init(too_large));
+        // The request itself fits, but rounding it to an OS page does not.
+        try std.testing.expectError(error.ReserveFailed, GrowingBuffer(u8).init(too_large - 1));
+        try std.testing.expectError(error.ReserveFailed, GrowingBuffer(u64).init(@divExact(too_large, @sizeOf(u64))));
+    }
+}
+
+test "FixedGrowingBufferAllocator rejects allocation overflow" {
+    const page_size = std.heap.pageSize();
+    for ([_]bool{ false, true }) |atomic_cursor| {
+        // Exercise the atomic cursor with one thread and no capacity growth.
+        var fba = if (atomic_cursor)
+            try FixedGrowingBufferAllocator.initCapacity(page_size, page_size)
+        else
+            try FixedGrowingBufferAllocator.init(page_size);
+        defer fba.deinit();
+        const allocator = if (atomic_cursor) fba.threadSafeAllocator() else fba.allocator();
+        const first = try allocator.alloc(u8, 1);
+        first[0] = 0x5a;
+        try std.testing.expectError(error.OutOfMemory, allocator.alloc(u8, std.math.maxInt(usize)));
+        try std.testing.expectEqual(@as(usize, 1), fba.end_index);
+        try std.testing.expectEqual(@as(u8, 0x5a), first[0]);
+        const second = try allocator.alloc(u8, 1);
+        try std.testing.expectEqual(first.ptr + 1, second.ptr);
+    }
+}
+
+test "FixedGrowingBufferAllocator rejects resize overflow" {
+    var fba = try FixedGrowingBufferAllocator.init(std.heap.pageSize());
+    defer fba.deinit();
+    const allocator = fba.allocator();
+    _ = try allocator.alloc(u8, 1);
+    const last = try allocator.alloc(u8, 1);
+    last[0] = 0x5a;
+    try std.testing.expect(!allocator.resize(last, std.math.maxInt(usize)));
+    try std.testing.expectEqual(@as(usize, 2), fba.end_index);
+    try std.testing.expectEqual(@as(u8, 0x5a), last[0]);
+}
+
+test "GrowingBuffer elements spanning page boundaries" {
+    const E = [3]u64;
+    const page_size = std.heap.pageSize();
+    const elements_per_page = @divFloor(page_size, @sizeOf(E));
+    var gb = try GrowingBuffer(E).init(3 * elements_per_page);
     defer gb.deinit();
 
+    try gb.ensureTotalCapacity(elements_per_page);
+    try std.testing.expectEqual(elements_per_page, gb.reserved_pages.len);
+    @memset(gb.reserved_pages, .{ 1, 2, 3 });
+    try gb.ensureTotalCapacity(elements_per_page + 1);
+    try std.testing.expectEqual(@divFloor(2 * page_size, @sizeOf(E)), gb.reserved_pages.len);
+    gb.reserved_pages[elements_per_page] = .{ 4, 5, 6 };
+    try gb.ensureTotalCapacity(gb.max_elements_count);
+    for (gb.reserved_pages[0..elements_per_page]) |element| {
+        try std.testing.expectEqual([3]u64{ 1, 2, 3 }, element);
+    }
+    try std.testing.expectEqual([3]u64{ 4, 5, 6 }, gb.reserved_pages[elements_per_page]);
+    try std.testing.expectEqual(gb.max_elements_count, gb.reserved_pages.len);
     try std.testing.expectError(error.OutOfMemory, gb.ensureTotalCapacity(gb.max_elements_count + 1));
 }
 
-test "GrowingBuffer page boundary crossing" {
-    const GB = GrowingBuffer(u8);
-    var gb = try GB.init(std.heap.page_size_min * 3);
+test "GrowingBuffer failed commit preserves capacity and permits retry" {
+    const failCommit = struct {
+        fn commit(_: []align(std.heap.page_size_min) u8) error{OutOfMemory}!void {
+            return error.OutOfMemory;
+        }
+    }.commit;
+    const E = [3]u64;
+    const page_size = std.heap.pageSize();
+    const initial_capacity = @divFloor(page_size, @sizeOf(E));
+    const max_capacity = @divFloor(2 * page_size, @sizeOf(E));
+    var gb = try GrowingBuffer(E).initCapacity(max_capacity, initial_capacity);
     defer gb.deinit();
+    @memset(gb.reserved_pages, .{ 1, 2, 3 });
+    const base = gb.reserved_pages.ptr;
 
-    const first_page = std.heap.page_size_min - 1;
-    try gb.ensureTotalCapacity(first_page);
-    try std.testing.expectEqual(std.heap.page_size_min, gb.reserved_pages.len);
+    try std.testing.expectError(error.OutOfMemory, gb.commitNewPages(initial_capacity + 1, failCommit));
+    try std.testing.expectEqual(initial_capacity, gb.reserved_pages.len);
+    try std.testing.expectEqual(base, gb.reserved_pages.ptr);
+    try std.testing.expectEqual(max_capacity, gb.max_elements_count);
+    for (gb.reserved_pages) |element| try std.testing.expectEqual(E{ 1, 2, 3 }, element);
 
-    try gb.ensureTotalCapacity(std.heap.page_size_min + 1);
-    try std.testing.expectEqual(std.heap.page_size_min * 2, gb.reserved_pages.len);
+    try gb.ensureTotalCapacity(initial_capacity + 1);
+    try std.testing.expectEqual(max_capacity, gb.reserved_pages.len);
+    try std.testing.expectEqual(base, gb.reserved_pages.ptr);
+    @memset(gb.reserved_pages[initial_capacity..], .{ 4, 5, 6 });
+    for (gb.reserved_pages[0..initial_capacity]) |element| try std.testing.expectEqual(E{ 1, 2, 3 }, element);
+}
+
+test "GrowingBuffer elements larger than a page" {
+    const E = [std.heap.page_size_max + 1]u8;
+    var gb = try GrowingBuffer(E).init(2);
+    defer gb.deinit();
+    try gb.ensureTotalCapacity(1);
+    @memset(&gb.reserved_pages[0], 0x5a);
+    try gb.ensureTotalCapacity(2);
+    @memset(&gb.reserved_pages[1], 0xa5);
+    for (gb.reserved_pages[0]) |byte| try std.testing.expectEqual(@as(u8, 0x5a), byte);
+}
+
+test "FixedGrowingBufferAllocator alignment padding cannot exceed capacity" {
+    const page_size = std.heap.pageSize();
+    var fba = try FixedGrowingBufferAllocator.init(page_size);
+    defer fba.deinit();
+    const allocator = fba.allocator();
+    _ = try allocator.alloc(u8, page_size - 1);
+    try std.testing.expect(allocator.rawAlloc(1, .fromByteUnits(page_size), @returnAddress()) == null);
+    try std.testing.expectEqual(page_size - 1, fba.end_index);
+    _ = try allocator.alloc(u8, 1);
+    try std.testing.expectError(error.OutOfMemory, allocator.alloc(u8, 1));
+    try std.testing.expectEqual(page_size, fba.end_index);
+}
+
+test "FixedGrowingBufferAllocator remap grows in place and rejects exhaustion" {
+    const page_size = std.heap.pageSize();
+    var fba = try FixedGrowingBufferAllocator.init(2 * page_size);
+    defer fba.deinit();
+    const allocator = fba.allocator();
+    const first = try allocator.alloc(u8, page_size);
+    @memset(first, 0x5a);
+    const grown = allocator.remap(first, 2 * page_size) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(first.ptr, grown.ptr);
+    for (grown[0..page_size]) |byte| try std.testing.expectEqual(@as(u8, 0x5a), byte);
+    @memset(grown[page_size..], 0xa5);
+    try std.testing.expect(allocator.remap(grown, grown.len + 1) == null);
+    try std.testing.expectEqual(grown.len, fba.end_index);
+    try std.testing.expectEqual(@as(u8, 0xa5), grown[grown.len - 1]);
+}
+
+test "FixedGrowingBufferAllocator deinit restores empty state" {
+    var fba = try FixedGrowingBufferAllocator.initCapacity(std.heap.pageSize(), 1);
+    _ = try fba.allocator().alloc(u8, 1);
+    fba.deinit();
+    try std.testing.expectEqual(@as(usize, 0), fba.end_index);
+    try std.testing.expectEqual(@as(u64, 0), fba.buffer.max_elements_count);
+    try std.testing.expectEqual(@as(usize, 0), fba.buffer.reserved_pages.len);
+    fba.deinit();
+    try std.testing.expectError(error.OutOfMemory, fba.allocator().alloc(u8, 1));
 }
 
 // This software is available under two licenses -- choose whichever you

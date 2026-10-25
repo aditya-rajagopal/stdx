@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = @import("stdx.zig").inlineAssert;
 pub const wav = @import("wav.zig");
 pub const flags = @import("flags.zig");
+pub const Arena = @import("arena.zig");
 
 const date_time = @import("date_time_utc.zig");
 pub const DateTimeUTC = date_time.DateTimeUTC;
@@ -20,7 +21,7 @@ pub const png = @import("png.zig");
 
 pub fn logFatal(comptime format: []const u8, args: anytype) noreturn {
     var threaded = std.Io.Threaded.init_single_threaded;
-    const io = threaded.ioBasic();
+    const io = threaded.io();
     var locked_stderr = io.lockStderr(&.{}, null) catch unreachable;
     var stderr = locked_stderr.terminal();
     defer io.unlockStderr();
@@ -56,8 +57,8 @@ pub fn divIntToFloat(comptime Float: type, numerator: anytype, denominator: anyt
 const builtin = @import("builtin");
 //https://github.com/ghostty-org/ghostty/blob/26e243a9194f8653e0b44cf00b600629fcee8f46/src/quirks.zig
 pub const inlineAssert = switch (builtin.mode) {
-    .Debug => std.debug.assert,
-    .ReleaseFast, .ReleaseSafe, .ReleaseSmall => struct {
+    .debug => std.debug.assert,
+    .fast, .safe, .small => struct {
         inline fn assert(cond: bool) void {
             if (!cond) unreachable;
         }

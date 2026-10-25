@@ -3,7 +3,7 @@
 //! ```zig
 //! const dt = @import("date_time_utc.zig").DateTimeUTC;
 //!
-//! const now = dt.now(); // Curret time in UTC
+//! const now = dt.now(io); // Current time in UTC using the caller's std.Io
 //! const some_dt = dt.fromString("20220101_010101", .YYYYMMDD_HHMMSS); // Parse a string into a DateTimeUTC
 //!
 //! std.debug.print("Current time is {f}\n", .{now});
@@ -14,9 +14,6 @@
 //! // Some date time is 20220101_010101.000Z
 //! ```
 //!
-//! @TODO
-//!     - GILA(fearless_vortex_srj) Move datetime to new Io interface
-//!
 //! @REVISION
 //!     0.3 - Added inline assertion instead of using std.debug.assert
 //!     0.2 - Added as() function to create a formater for the date_time
@@ -26,61 +23,13 @@ const builtin = @import("builtin");
 
 //https://github.com/ghostty-org/ghostty/blob/26e243a9194f8653e0b44cf00b600629fcee8f46/src/quirks.zig
 const assert = switch (builtin.mode) {
-    .Debug => std.debug.assert,
-    .ReleaseFast, .ReleaseSafe, .ReleaseSmall => struct {
+    .debug => std.debug.assert,
+    .fast, .safe, .small => struct {
         inline fn assert(cond: bool) void {
             if (!cond) unreachable;
         }
     }.assert,
 };
-
-const epoch = std.time.epoch;
-const ns_per_s = std.time.ns_per_s;
-const ns_per_ms = std.time.ns_per_ms;
-const windows = std.os.windows;
-const posix = std.posix;
-
-/// Get a calendar timestamp, in milliseconds, relative to UTC 1970-01-01.
-/// Precision of timing depends on the hardware and operating system.
-/// The return value is signed because it is possible to have a date that is
-/// before the epoch.
-/// See `posix.clock_gettime` for a POSIX timestamp.
-fn milliTimestamp() i64 {
-    return @as(i64, @intCast(@divFloor(nanoTimestamp(), ns_per_ms)));
-}
-
-/// Get a calendar timestamp, in nanoseconds, relative to UTC 1970-01-01.
-/// Precision of timing depends on the hardware and operating system.
-/// On Windows this has a maximum granularity of 100 nanoseconds.
-/// The return value is signed because it is possible to have a date that is
-/// before the epoch.
-/// See `posix.clock_gettime` for a POSIX timestamp.
-fn nanoTimestamp() i96 {
-    switch (builtin.os.tag) {
-        .windows => {
-            // RtlGetSystemTimePrecise() has a granularity of 100 nanoseconds and uses the NTFS/Windows epoch,
-            // which is 1601-01-01.
-            const epoch_adj = epoch.windows * ns_per_s;
-            return @as(i96, windows.ntdll.RtlGetSystemTimePrecise() * 100 + epoch_adj);
-        },
-        .wasi => {
-            var ns: std.os.wasi.timestamp_t = undefined;
-            const err = std.os.wasi.clock_time_get(.REALTIME, 1, &ns);
-            assert(err == .SUCCESS);
-            return ns;
-        },
-        .uefi => {
-            const value, _ = std.os.uefi.system_table.runtime_services.getTime() catch return 0;
-            return value.toEpoch();
-        },
-        else => {
-            const ts = posix.clock_gettime(.REALTIME) catch |err| switch (err) {
-                error.UnsupportedClock, error.Unexpected => return 0, // "Precision of timing depends on hardware and OS".
-            };
-            return (@as(i96, ts.sec) * ns_per_s) + ts.nsec;
-        },
-    }
-}
 
 // Modified from https://github.com/tigerbeetle/tigerbeetle/blob/16d62f0ce7d4ef3db58714c9b7a0c46480c19bc3/src/stdx.zig#L985
 pub const DateTimeUTC = packed struct(u64) {
@@ -110,9 +59,9 @@ pub const DateTimeUTC = packed struct(u64) {
         @"YYYY-MM-DDTHH:MM:SS",
     };
 
-    pub fn now() DateTimeUTC {
-        const timestamp_ms = milliTimestamp();
-        assert(timestamp_ms > 0);
+    pub fn now(io: std.Io) DateTimeUTC {
+        const timestamp_ms = std.Io.Clock.real.now(io).toMilliseconds();
+        assert(timestamp_ms >= 0);
         return DateTimeUTC.fromTimestampMs(@intCast(timestamp_ms));
     }
 

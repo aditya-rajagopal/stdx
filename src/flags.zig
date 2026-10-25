@@ -156,6 +156,7 @@
 //!     - GILA(fatherly_axe_dtd) Consider adding true default for booleans and disabling with --no-<flag>
 //!
 //! @REVISION
+//!     0.6 - updated to zig 0.18.0-dev.362+705a6b4ef
 //!     0.5 - Use std.sort.heap instead of std.mem.sort to avoid @memcpy
 //!     0.4 - Added inline assertion instead of using std.debug.assert
 //!     0.3 - Moved to zig 0.16 Args
@@ -168,8 +169,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 //https://github.com/ghostty-org/ghostty/blob/26e243a9194f8653e0b44cf00b600629fcee8f46/src/quirks.zig
 pub const assert = switch (builtin.mode) {
-    .Debug => std.debug.assert,
-    .ReleaseFast, .ReleaseSafe, .ReleaseSmall => struct {
+    .debug => std.debug.assert,
+    .fast, .safe, .small => struct {
         inline fn assert(cond: bool) void {
             if (!cond) unreachable;
         }
@@ -321,6 +322,7 @@ pub fn parseArgs(
     /// Allocator used to forward to the parseFlagValue function of the custom types in case they need to allocate memory for their own needs.
     /// The user is responsible for managing the lifetime of the memory allocated by the parseFlagValue function.
     arena: std.mem.Allocator,
+    // TODO: Accept just the std.process.Args and make the iterator here on the arena
     args: *std.process.Args.Iterator,
     /// The type of the arguments to parse. Must be a struct or union
     comptime ArgType: type,
@@ -355,8 +357,8 @@ fn parseFlags(io: std.Io, args: *std.process.Args.Iterator, comptime Flags: type
     // @NOTE We can have flags with the same prefix like --foo-bar and --foo. So to make sure we parse them correctly
     // We need to sort the fields by longest name first so that we can check if the given argument is a prefix of a flag.
     // This way we ensure that when we check against --foo we have already checked against --foo-bar.
-    comptime std.sort.heap(Type.StructField, parsed_fields.fields[0..parsed_fields.field_count], {}, struct {
-        fn lessThan(context: void, l: Type.StructField, r: Type.StructField) bool {
+    comptime std.sort.heap(StructField, parsed_fields.fields[0..parsed_fields.field_count], {}, struct {
+        fn lessThan(context: void, l: StructField, r: StructField) bool {
             _ = context;
             const lhs = comptime std.mem.span(l.name.ptr);
             const rhs = comptime std.mem.span(r.name.ptr);
@@ -381,11 +383,11 @@ fn parseFlags(io: std.Io, args: *std.process.Args.Iterator, comptime Flags: type
     // @NOTE We need to store if, while parsing the fields, we encountered a particular flag or not. We can set the fields
     // that did not recieve an argument to their default values and also catch multiple entries for the same flag.
     var counts = comptime blk: {
-        var count_fields = std.meta.fields(Flags)[0..std.meta.fields(Flags).len].*;
+        const count_fields = structFields(Flags);
         var names: [count_fields.len][]const u8 = undefined;
         var types: [count_fields.len]type = undefined;
-        var attributes: [count_fields.len]Type.StructField.Attributes = undefined;
-        for (&count_fields, 0..) |*field, i| {
+        var attributes: [count_fields.len]Type.Struct.FieldAttributes = undefined;
+        for (count_fields, 0..) |field, i| {
             names[i] = field.name;
             types[i] = u32;
             attributes[i] = .{
@@ -515,13 +517,13 @@ fn parseCommand(io: std.Io, args: *std.process.Args.Iterator, comptime Command: 
     if (info != .@"union") {
         @compileError("Expected union type, found '" ++ @typeName(Command) ++ "' when parsing command");
     }
-    if (info.@"union".fields.len == 0) {
+    if (info.@"union".field_names.len == 0) {
         @compileError("Expected at least 1 field in union type '" ++ @typeName(Command) ++ "' when parsing command");
     }
     // @TODO Should there be enforcement that if command has only 1 field then it should have been a struct?
     //       This would be a compile error. But i personally dont think it is a good idea especially when you are developing
     //       a cli. You dont have all the commands in at the start. If only there was a compile warning for this.
-    if (info.@"union".fields.len == 1) {
+    if (info.@"union".field_names.len == 1) {
         log.warn("Command union '{s}' only has 1 field. This should probably be a struct", .{@typeName(Command)});
     }
 
@@ -555,12 +557,12 @@ fn parseCommand(io: std.Io, args: *std.process.Args.Iterator, comptime Command: 
         }
     }
 
-    inline for (info.@"union".fields) |field| {
-        if (std.mem.eql(u8, field.name, command)) {
+    inline for (info.@"union".field_names, info.@"union".field_types) |field_name, FieldType| {
+        if (std.mem.eql(u8, field_name, command)) {
             return @unionInit(
                 Command,
-                field.name,
-                parseFlags(io, args, field.type),
+                field_name,
+                parseFlags(io, args, FieldType),
             );
         }
     }
@@ -630,13 +632,13 @@ fn parseFlagValue(comptime Flag: type, flag_name: []const u8, flag_value: [:0]co
     }
 
     if (@typeInfo(Value) == .@"enum") {
-        comptime assert(@typeInfo(Value).@"enum".is_exhaustive);
+        comptime assert(@typeInfo(Value).@"enum".mode == .exhaustive);
 
         return std.meta.stringToEnum(Value, flag_value) orelse {
             const valid_values = comptime blk: {
                 var valid_values: []const u8 = &.{};
-                for (@typeInfo(Value).@"enum".fields) |field| {
-                    valid_values = valid_values ++ "\n" ++ field.name ++ ",";
+                for (@typeInfo(Value).@"enum".field_names) |field_name| {
+                    valid_values = valid_values ++ "\n" ++ field_name ++ ",";
                 }
                 break :blk valid_values;
             };
@@ -674,21 +676,37 @@ fn parseFlagValue(comptime Flag: type, flag_name: []const u8, flag_value: [:0]co
 }
 
 const Type = std.builtin.Type;
+
+// Keep the parser's sortable field records while reading Zig's separate metadata arrays.
+const StructField = struct {
+    name: [:0]const u8,
+    type: type,
+    default_value_ptr: ?*const anyopaque,
+};
+
+fn structFields(comptime T: type) [@typeInfo(T).@"struct".field_names.len]StructField {
+    const info = @typeInfo(T).@"struct";
+    var fields: [info.field_names.len]StructField = undefined;
+    for (info.field_names, info.field_types, info.field_attrs, 0..) |name, FieldType, attrs, i| {
+        fields[i] = .{ .name = name, .type = FieldType, .default_value_ptr = attrs.default_value_ptr };
+    }
+    return fields;
+}
 fn parseStructFields(comptime Flags: type) struct {
-    fields: [std.meta.fields(Flags).len]Type.StructField,
+    fields: [@typeInfo(Flags).@"struct".field_names.len]StructField,
     field_count: usize,
-    positional_fields: []const Type.StructField,
+    positional_fields: []const StructField,
 } {
     const info = @typeInfo(Flags).@"struct";
-    comptime var fields: [info.fields.len]Type.StructField = undefined;
+    comptime var fields: [info.field_names.len]StructField = undefined;
     comptime var field_count: usize = 0;
-    comptime var positional_fields: []const Type.StructField = &.{};
-    for (info.fields) |field| {
+    comptime var positional_fields: []const StructField = &.{};
+    for (structFields(Flags)) |field| {
         if (std.mem.eql(u8, field.name, "positional")) {
             if (@typeInfo(field.type) != .@"struct") {
                 @compileError("Positional field '" ++ field.name ++ "' in struct '" ++ @typeName(Flags) ++ "' must be a struct type.");
             }
-            positional_fields = @typeInfo(field.type).@"struct".fields;
+            positional_fields = &structFields(field.type);
             var found_first_optional_with_no_default_value: bool = false;
 
             for (positional_fields) |positional_field| {
@@ -762,7 +780,7 @@ fn parseStructFields(comptime Flags: type) struct {
     };
 }
 
-fn checkField(comptime field: std.builtin.Type.StructField, @"struct": type) void {
+fn checkField(comptime field: StructField, @"struct": type) void {
     if (field.type == []const u8 or field.type == [:0]const u8 or @typeInfo(field.type) == .int or @typeInfo(field.type) == .float) {
         return;
     }
@@ -773,11 +791,11 @@ fn checkField(comptime field: std.builtin.Type.StructField, @"struct": type) voi
 
     if (@typeInfo(field.type) == .@"enum") {
         const info = @typeInfo(field.type).@"enum";
-        if (!info.is_exhaustive) {
+        if (info.mode != .exhaustive) {
             @compileError("Field '" ++ field.name ++ "' in struct '" ++ @typeName(@"struct") ++ "' of type '" ++ @typeName(field.type) ++ "' must have an exhaustive Enum type.");
         }
-        if (info.fields.len < 2) {
-            const err = std.fmt.comptimePrint("Field '" ++ field.name ++ "' in struct '" ++ @typeName(@"struct") ++ "' of type '" ++ @typeName(field.type) ++ "' must have at least 2 possible enum values. Has {}", .{info.fields.len});
+        if (info.field_names.len < 2) {
+            const err = std.fmt.comptimePrint("Field '" ++ field.name ++ "' in struct '" ++ @typeName(@"struct") ++ "' of type '" ++ @typeName(field.type) ++ "' must have at least 2 possible enum values. Has {}", .{info.field_names.len});
             @compileError(err);
         }
         return;
@@ -792,11 +810,11 @@ fn checkField(comptime field: std.builtin.Type.StructField, @"struct": type) voi
         }
         if (child == .@"enum") {
             const info_enum = @typeInfo(info.child).@"enum";
-            if (!info_enum.is_exhaustive) {
+            if (info_enum.mode != .exhaustive) {
                 @compileError("Field '" ++ field.name ++ "' in struct '" ++ @typeName(@"struct") ++ "' of type '" ++ @typeName(field.type) ++ "' must have an exhaustive Enum type.");
             }
-            if (info_enum.fields.len < 2) {
-                const err = std.fmt.comptimePrint("Field '" ++ field.name ++ "' in struct '" ++ @typeName(@"struct") ++ "' of type '" ++ @typeName(field.type) ++ "' must have at least 2 possible enum values. Has {}", .{info_enum.fields.len});
+            if (info_enum.field_names.len < 2) {
+                const err = std.fmt.comptimePrint("Field '" ++ field.name ++ "' in struct '" ++ @typeName(@"struct") ++ "' of type '" ++ @typeName(field.type) ++ "' must have at least 2 possible enum values. Has {}", .{info_enum.field_names.len});
                 @compileError(err);
             }
             return;
@@ -814,7 +832,7 @@ fn checkField(comptime field: std.builtin.Type.StructField, @"struct": type) voi
         "For custom types please wrap it in a struct with a `" ++ flag_parse_function_name ++ "` function.");
 }
 
-fn defaultValue(comptime field: std.builtin.Type.StructField) ?field.type {
+fn defaultValue(comptime field: StructField) ?field.type {
     return if (field.default_value_ptr) |default_opaque|
         @as(*const field.type, @ptrCast(@alignCast(default_opaque))).*
     else
@@ -823,7 +841,7 @@ fn defaultValue(comptime field: std.builtin.Type.StructField) ?field.type {
 
 fn logFatal(comptime format: []const u8, args: anytype) noreturn {
     var threaded = std.Io.Threaded.init_single_threaded;
-    const io = threaded.ioBasic();
+    const io = threaded.io();
     var locked_stderr = io.lockStderr(&.{}, null) catch unreachable;
     var stderr = locked_stderr.terminal();
     defer io.unlockStderr();
